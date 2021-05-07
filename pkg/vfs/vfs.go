@@ -98,7 +98,7 @@ func Lookup(ctx Context, parent Ino, name string) (entry *meta.Entry, err syscal
 }
 
 func GetAttr(ctx Context, ino Ino, fh uint64) (entry *meta.Entry, err syscall.Errno) {
-	defer func() { logit(ctx, "getattr (%d): %s%s", ino, strerr(err), (*Entry)(entry)) }()
+	defer func() { logit(ctx, "getattr (%d, %d): %s%s", ino, fh, strerr(err), (*Entry)(entry)) }()
 	if IsSpecialNode(ino) && getInternalNode(ino) != nil {
 		n := getInternalNode(ino)
 		entry = &meta.Entry{Inode: n.inode, Attr: n.attr}

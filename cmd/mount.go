@@ -165,6 +165,7 @@ func mount(c *cli.Context) error {
 		Format:     format,
 		Version:    version.Version(),
 		Mountpoint: mp,
+		OpenCache:  c.Bool("open-cache"),
 		Chunk:      &chunkConf,
 	}
 	vfs.Init(conf, m, store)
