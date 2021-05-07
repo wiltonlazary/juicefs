@@ -50,6 +50,7 @@ type handle struct {
 	reader     FileReader
 	writer     FileWriter
 	ops        []Context
+	attr       *Attr
 
 	// rwlock
 	writing uint32
@@ -200,10 +201,11 @@ func releaseHandle(inode Ino, fh uint64) {
 	}
 }
 
-func newFileHandle(inode Ino, length uint64, flags uint32) uint64 {
+func newFileHandle(inode Ino, length uint64, flags uint32, attr *Attr) uint64 {
 	h := newHandle(inode)
 	h.Lock()
 	defer h.Unlock()
+	h.attr = attr
 	switch flags & O_ACCMODE {
 	case syscall.O_RDONLY:
 		h.reader = reader.Open(inode, length)

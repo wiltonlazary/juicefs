@@ -34,6 +34,7 @@ var logger = utils.GetLogger("juicefs")
 
 type fileSystem struct {
 	fuse.RawFileSystem
+	conf            *vfs.Config
 	cacheMode       int
 	attrTimeout     time.Duration
 	direntryTimeout time.Duration
@@ -75,11 +76,7 @@ func (fs *fileSystem) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name
 func (fs *fileSystem) GetAttr(cancel <-chan struct{}, in *fuse.GetAttrIn, out *fuse.AttrOut) (code fuse.Status) {
 	ctx := newContext(cancel, &in.InHeader)
 	defer releaseContext(ctx)
-	var opened uint8
-	if in.Fh() != 0 {
-		opened = 1
-	}
-	entry, err := vfs.GetAttr(ctx, Ino(in.NodeId), opened)
+	entry, err := vfs.GetAttr(ctx, Ino(in.NodeId), in.Fh())
 	if err != 0 {
 		return fuse.Status(err)
 	}
@@ -242,6 +239,8 @@ func (fs *fileSystem) Open(cancel <-chan struct{}, in *fuse.OpenIn, out *fuse.Op
 	out.Fh = fh
 	if vfs.IsSpecialNode(Ino(in.NodeId)) {
 		out.OpenFlags |= fuse.FOPEN_DIRECT_IO
+	} else if fs.conf.OpenCache {
+		out.OpenFlags |= fuse.FOPEN_KEEP_CACHE
 	}
 	return 0
 }
@@ -424,6 +423,7 @@ func Serve(conf *vfs.Config, options string, attrCacheTo, entryCacheTo, dirEntry
 	imp.attrTimeout = time.Millisecond * time.Duration(attrCacheTo*1000)
 	imp.entryTimeout = time.Millisecond * time.Duration(entryCacheTo*1000)
 	imp.direntryTimeout = time.Millisecond * time.Duration(dirEntryCacheTo*1000)
+	imp.conf = conf
 
 	var opt fuse.MountOptions
 	opt.FsName = "JuiceFS:" + conf.Format.Name

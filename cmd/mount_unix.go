@@ -102,6 +102,10 @@ func mount_flags() []cli.Flag {
 			Usage: "dir entry cache timeout in seconds",
 		},
 		&cli.BoolFlag{
+			Name:  "open-cache",
+			Usage: "cache the attribute of file after open",
+		},
+		&cli.BoolFlag{
 			Name:  "enable-xattr",
 			Usage: "enable extended attributes (xattr)",
 		},

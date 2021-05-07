@@ -44,6 +44,7 @@ type Config struct {
 	Version    string
 	Mountpoint string
 	AccessLog  string
+	OpenCache  bool
 }
 
 var (
@@ -96,14 +97,21 @@ func Lookup(ctx Context, parent Ino, name string) (entry *meta.Entry, err syscal
 	return
 }
 
-func GetAttr(ctx Context, ino Ino, opened uint8) (entry *meta.Entry, err syscall.Errno) {
+func GetAttr(ctx Context, ino Ino, fh uint64) (entry *meta.Entry, err syscall.Errno) {
 	defer func() { logit(ctx, "getattr (%d): %s%s", ino, strerr(err), (*Entry)(entry)) }()
 	if IsSpecialNode(ino) && getInternalNode(ino) != nil {
 		n := getInternalNode(ino)
 		entry = &meta.Entry{Inode: n.inode, Attr: n.attr}
 		return
 	}
-	var attr = &Attr{}
+	if conf.OpenCache && fh > 0 {
+		h := findHandle(ino, fh)
+		if h.attr != nil {
+			entry = &meta.Entry{Inode: ino, Attr: h.attr}
+			return
+		}
+	}
+	attr := &Attr{}
 	err = m.GetAttr(ctx, ino, attr)
 	if err != 0 {
 		return
@@ -378,7 +386,7 @@ func Create(ctx Context, parent Ino, name string, mode uint16, cumask uint16, fl
 		return
 	}
 
-	fh = newFileHandle(inode, 0, flags)
+	fh = newFileHandle(inode, 0, flags, attr)
 	entry = &meta.Entry{Inode: inode, Attr: attr}
 	return
 }
@@ -416,7 +424,7 @@ func Open(ctx Context, ino Ino, flags uint32) (entry *meta.Entry, fh uint64, err
 	}
 
 	UpdateLength(ino, attr)
-	fh = newFileHandle(ino, attr.Length, flags)
+	fh = newFileHandle(ino, attr.Length, flags, attr)
 	entry = &meta.Entry{Inode: ino, Attr: attr}
 	return
 }
@@ -583,6 +591,9 @@ func Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno)
 	}
 	defer h.Wunlock()
 
+	if h.attr != nil {
+		h.attr = nil
+	}
 	err = h.writer.Write(ctx, off, buf)
 	if err == syscall.ENOENT || err == syscall.EPERM || err == syscall.EINVAL {
 		err = syscall.EBADF
@@ -874,8 +885,10 @@ func RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
 }
 
 var logger = utils.GetLogger("juicefs")
+var conf *Config
 
-func Init(conf *Config, m_ meta.Meta, store chunk.ChunkStore) {
+func Init(conf_ *Config, m_ meta.Meta, store chunk.ChunkStore) {
+	conf = conf_
 	m = m_
 	reader = NewDataReader(conf, m, store)
 	writer = NewDataWriter(conf, m, store)
