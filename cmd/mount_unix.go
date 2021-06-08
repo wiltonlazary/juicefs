@@ -31,25 +31,29 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+func checkMountpoint(name, mp string) {
+	for i := 0; i < 20; i++ {
+		time.Sleep(time.Millisecond * 500)
+		st, err := os.Stat(mp)
+		if err == nil {
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Ino == 1 {
+				logger.Infof("\033[92mOK\033[0m, %s is ready at %s", name, mp)
+				return
+			}
+		}
+		os.Stdout.WriteString(".")
+		os.Stdout.Sync()
+	}
+	os.Stdout.WriteString("\n")
+	logger.Fatalf("fail to mount after 10 seconds, please mount in foreground")
+}
+
 func makeDaemon(name, mp string) error {
 	onExit := func(stage int) error {
 		if stage != 0 {
 			return nil
 		}
-		for i := 0; i < 20; i++ {
-			time.Sleep(time.Millisecond * 500)
-			st, err := os.Stat(mp)
-			if err == nil {
-				if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Ino == 1 {
-					logger.Infof("\033[92mOK\033[0m, %s is ready at %s", name, mp)
-					return nil
-				}
-			}
-			os.Stdout.WriteString(".")
-			os.Stdout.Sync()
-		}
-		os.Stdout.WriteString("\n")
-		logger.Fatalf("fail to mount after 10 seconds, please mount in foreground")
+		checkMountpoint(name, mp)
 		return nil
 	}
 

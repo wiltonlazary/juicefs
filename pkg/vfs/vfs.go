@@ -38,17 +38,19 @@ const (
 )
 
 type Config struct {
-	Meta       *meta.Config
-	Format     *meta.Format
-	Chunk      *chunk.Config
-	Version    string
-	Mountpoint string
-	AccessLog  string
-	OpenCache  bool
+	Meta        *meta.Config
+	Format      *meta.Format
+	Chunk       *chunk.Config
+	Version     string
+	Mountpoint  string
+	FastResolve bool
+	AccessLog   string
+	OpenCache   bool
 }
 
 var (
 	m      meta.Meta
+	store  chunk.ChunkStore
 	reader DataReader
 	writer DataWriter
 )
@@ -887,9 +889,10 @@ func RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
 var logger = utils.GetLogger("juicefs")
 var conf *Config
 
-func Init(conf_ *Config, m_ meta.Meta, store chunk.ChunkStore) {
+func Init(conf_ *Config, m_ meta.Meta, store_ chunk.ChunkStore) {
 	conf = conf_
 	m = m_
+	store = store_
 	reader = NewDataReader(conf, m, store)
 	writer = NewDataWriter(conf, m, store)
 	handles = make(map[Ino][]*handle)

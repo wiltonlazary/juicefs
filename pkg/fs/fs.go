@@ -352,7 +352,7 @@ func (fs *FileSystem) Rmr(ctx meta.Context, p string) (err syscall.Errno) {
 	if err != 0 {
 		return
 	}
-	err = fs.m.Rmr(ctx, parent.inode, path.Base(p))
+	err = meta.Remove(fs.m, ctx, parent.inode, path.Base(p))
 	return
 }
 
@@ -406,10 +406,6 @@ func (fs *FileSystem) Readlink(ctx meta.Context, link string) (path []byte, err 
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Readlink (%s): %s (%d)", link, errstr(err), len(path)) }()
 	fi, err := fs.lookup(ctx, link, false)
-	if err != 0 {
-		return
-	}
-	err = fs.m.Access(ctx, fi.inode, mMaskR, fi.attr)
 	if err != 0 {
 		return
 	}
@@ -531,9 +527,26 @@ func (fs *FileSystem) RemoveXattr(ctx meta.Context, p string, name string) (err 
 }
 
 func (fs *FileSystem) lookup(ctx meta.Context, p string, followLastSymlink bool) (fi *FileStat, err syscall.Errno) {
+	var inode Ino
+	var attr = &Attr{}
+
+	if fs.conf.FastResolve {
+		err = fs.m.Resolve(ctx, 1, p, &inode, attr)
+		if err == 0 {
+			fi = AttrToFileInfo(inode, attr)
+			p = strings.TrimRight(p, "/")
+			ss := strings.Split(p, "/")
+			fi.name = ss[len(ss)-1]
+		}
+		if err != syscall.ENOTSUP {
+			return
+		}
+	}
+
+	// Fallback to the default implementation that calls `fs.m.Lookup` for each directory along the path.
+	// It might be slower for deep directories, but it works for every meta that implements `Lookup`.
 	parent := Ino(1)
 	ss := strings.Split(p, "/")
-	var attr = &Attr{}
 	for i, name := range ss {
 		if len(name) == 0 {
 			continue
@@ -552,7 +565,6 @@ func (fs *FileSystem) lookup(ctx meta.Context, p string, followLastSymlink bool)
 
 		var inode Ino
 		var resolved bool
-		// TODO: speed up by resolve the path in Redis
 		err = fs.m.Lookup(ctx, parent, name, &inode, attr)
 		if i == len(ss)-1 {
 			resolved = true
@@ -659,7 +671,7 @@ func (f *File) Chmod(ctx meta.Context, mode uint16) (err syscall.Errno) {
 	defer trace.StartRegion(context.TODO(), "fs.Chmod").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { f.fs.log(l, "Chmod (%s,%o): %s", f.path, mode, errstr(err)) }()
-	if ctx.Uid() != f.info.attr.Uid {
+	if ctx.Uid() != 0 && ctx.Uid() != f.info.attr.Uid {
 		return syscall.EACCES
 	}
 	var attr = Attr{Mode: mode}
@@ -671,14 +683,29 @@ func (f *File) Chown(ctx meta.Context, uid uint32, gid uint32) (err syscall.Errn
 	defer trace.StartRegion(context.TODO(), "fs.Chown").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { f.fs.log(l, "Chown (%s,%d,%d): %s", f.path, uid, gid, errstr(err)) }()
-	if ctx.Uid() != 0 {
-		return syscall.EACCES
-	}
 	var flag uint16
 	if uid != uint32(f.info.Uid()) {
+		if ctx.Uid() != 0 {
+			return syscall.EACCES
+		}
 		flag |= meta.SetAttrUID
 	}
 	if gid != uint32(f.info.Gid()) {
+		if ctx.Uid() != 0 {
+			if ctx.Uid() != uint32(f.info.Uid()) {
+				return syscall.EACCES
+			}
+			var found = false
+			for _, g := range ctx.Gids() {
+				if gid == g {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return syscall.EACCES
+			}
+		}
 		flag |= meta.SetAttrGID
 	}
 	var attr = Attr{Uid: uid, Gid: gid}
@@ -898,7 +925,7 @@ func (f *File) ReaddirPlus(ctx meta.Context, offset int) (entries []*meta.Entry,
 	f.Lock()
 	defer f.Unlock()
 	if f.entries == nil {
-		err = f.fs.m.Access(ctx, f.inode, mMaskR, f.info.attr)
+		err = f.fs.m.Access(ctx, f.inode, mMaskR|mMaskX, f.info.attr)
 		if err != 0 {
 			return nil, err
 		}
@@ -929,6 +956,6 @@ func (f *File) Summary(ctx meta.Context, depth uint8, maxentries uint32) (s *met
 		f.fs.log(l, "Summary (%s): %s (%d,%d,%d,%d)", f.path, errstr(err), s.Length, s.Size, s.Files, s.Dirs)
 	}()
 	s = &meta.Summary{}
-	err = f.fs.m.Summary(ctx, f.inode, s)
+	err = meta.GetSummary(f.fs.m, ctx, f.inode, s)
 	return
 }

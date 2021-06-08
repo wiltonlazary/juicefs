@@ -21,55 +21,47 @@ import (
 	"strings"
 )
 
-type version struct {
-	major, minor, patch int
+type redisVersion struct {
+	ver          string
+	major, minor int
 }
 
-var oldestSupportedVer = version{2, 2, 0}
+var oldestSupportedVer = redisVersion{"2.2.x", 2, 2}
 
-func parseVersion(v string) (ver version, err error) {
-	parts := strings.SplitN(v, ".", 3)
-	if len(parts) != 3 {
-		err = fmt.Errorf("invalid version: %v", v)
+func parseRedisVersion(v string) (ver redisVersion, err error) {
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 {
+		err = fmt.Errorf("invalid redisVersion: %v", v)
 		return
 	}
+	ver.ver = v
 	ver.major, err = strconv.Atoi(parts[0])
 	if err != nil {
 		return
 	}
 	ver.minor, err = strconv.Atoi(parts[1])
-	if err != nil {
-		return
-	}
-	ver.patch, err = strconv.Atoi(parts[2])
 	return
 }
 
-func (ver version) olderThan(v2 version) bool {
+func (ver redisVersion) olderThan(v2 redisVersion) bool {
 	if ver.major < v2.major {
 		return true
 	}
 	if ver.major > v2.major {
 		return false
 	}
-	if ver.minor < v2.minor {
-		return true
-	}
-	if ver.minor > v2.minor {
-		return false
-	}
-	return ver.patch < v2.patch
+	return ver.minor < v2.minor
 }
 
-func (ver version) String() string {
-	return fmt.Sprintf("%d.%d.%d", ver.major, ver.minor, ver.patch)
+func (ver redisVersion) String() string {
+	return ver.ver
 }
 
 type redisInfo struct {
 	aofEnabled      bool
 	clusterEnabled  bool
 	maxMemoryPolicy string
-	version         string
+	redisVersion    string
 }
 
 func checkRedisInfo(rawInfo string) (info redisInfo, err error) {
@@ -98,10 +90,10 @@ func checkRedisInfo(rawInfo string) (info redisInfo, err error) {
 				logger.Warnf("maxmemory_policy is %q, please set it to 'noeviction'.", val)
 			}
 		case "redis_version":
-			info.version = val
-			ver, err := parseVersion(val)
+			info.redisVersion = val
+			ver, err := parseRedisVersion(val)
 			if err != nil {
-				logger.Warnf("Failed to parse Redis server version: %q", ver)
+				logger.Warnf("Failed to parse Redis server version %q: %s", ver, err)
 			} else {
 				if ver.olderThan(oldestSupportedVer) {
 					logger.Warnf("Redis version should not be older than %s", oldestSupportedVer)

@@ -71,13 +71,21 @@ func parseLine(line string) *logEntry {
 		return nil
 	}
 	fields := strings.Fields(line)
+	if len(fields) < 5 {
+		logger.Warnf("Log line is invalid: %s", line)
+		return nil
+	}
 	ts, err := time.Parse("2006.01.02 15:04:05.000000", strings.Join([]string{fields[0], fields[1]}, " "))
 	if err != nil {
 		logger.Warnf("Failed to parse log line: %s: %s", line, err)
 		return nil
 	}
 	ids := findDigits.FindAllString(fields[2], 3) // e.g: [uid:0,gid:0,pid:36674]
-	latStr := fields[len(fields)-1]               // e.g: <0.000003>
+	if len(ids) != 3 {
+		logger.Warnf("Log line is invalid: %s", line)
+		return nil
+	}
+	latStr := fields[len(fields)-1] // e.g: <0.000003>
 	latFloat, err := strconv.ParseFloat(latStr[1:len(latStr)-1], 64)
 	if err != nil {
 		logger.Warnf("Failed to parse log line: %s: %s", line, err)
@@ -190,12 +198,15 @@ func (p *profiler) flush(timeStamp time.Time, keyStats []keyStat, done bool) {
 		}
 	}
 	output := make([]string, 3)
-	output[0] = fmt.Sprintf("> %s JuiceFS Profiling%s", timeStamp.Format(time.RFC1123), head)
-	output[1] = fmt.Sprintln("[enter]Pause/Continue")
-	output[2] = fmt.Sprintf("%-16s %10s %15s %18s", "OP", "Number", "Average(us)", "Total(us)")
+	output[0] = fmt.Sprintf("> JuiceFS Profiling %13s  Refresh: %.0f seconds %20s",
+		head, p.interval.Seconds(), timeStamp.Format("2006-01-02T15:04:05"))
+	output[2] = fmt.Sprintf("%-14s %10s %15s %18s %14s", "Operation", "Count", "Average(us)", "Total(us)", "Percent(%)")
 	for _, s := range keyStats {
-		output = append(output, fmt.Sprintf("%-16s %10d %15.0f %18d",
-			s.key, s.sPtr.count, float64(s.sPtr.total)/float64(s.sPtr.count), s.sPtr.total))
+		output = append(output, fmt.Sprintf("%-14s %10d %15.0f %18d %14.1f",
+			s.key, s.sPtr.count, float64(s.sPtr.total)/float64(s.sPtr.count), s.sPtr.total, float64(s.sPtr.total)/float64(p.interval.Microseconds())*100.0))
+	}
+	if p.replay {
+		output[1] = fmt.Sprintln("\n[enter]Pause/Continue")
 	}
 	printLines(output, p.tty)
 }
@@ -228,13 +239,14 @@ func (p *profiler) flusher() {
 				keyStats = append(keyStats, keyStat{k, s})
 			}
 			sort.Slice(keyStats, func(i, j int) bool { // reversed
-				return keyStats[i].sPtr.count > keyStats[j].sPtr.count
+				return keyStats[i].sPtr.total > keyStats[j].sPtr.total
 			})
 			p.flush(ts, keyStats, done)
 			if done {
 				os.Exit(0)
 			}
 		case paused = <-p.pause:
+			fmt.Printf("\n\033[97mPaused. Press [enter] to continue.\n\033[0m")
 			<-p.pause
 		case done = <-p.done:
 		}
@@ -297,7 +309,9 @@ func profile(ctx *cli.Context) error {
 		if prof.tty {
 			fmt.Print("\033[1A\033[K") // move cursor back
 		}
-		prof.pause <- true // pause/continue
+		if prof.replay {
+			prof.pause <- true // pause/continue
+		}
 	}
 }
 

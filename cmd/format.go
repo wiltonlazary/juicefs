@@ -143,16 +143,7 @@ func format(c *cli.Context) error {
 	if c.Args().Len() < 1 {
 		logger.Fatalf("Redis URL and name are required")
 	}
-	addr := c.Args().Get(0)
-	if !strings.Contains(addr, "://") {
-		addr = "redis://" + addr
-	}
-	logger.Infof("Meta address: %s", addr)
-	var rc = meta.RedisConfig{Retries: 2}
-	m, err := meta.NewRedisMeta(addr, &rc)
-	if err != nil {
-		logger.Fatalf("Meta is not available: %s", err)
-	}
+	m := meta.NewClient(c.Args().Get(0), &meta.Config{Retries: 2})
 
 	if c.Args().Len() < 2 {
 		logger.Fatalf("Please give it a name")
@@ -160,7 +151,7 @@ func format(c *cli.Context) error {
 	name := c.Args().Get(1)
 	validName := regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$`)
 	if !validName.MatchString(name) {
-		logger.Fatalf("invalid name: %s, only alphabet, number and - are allowed.", name)
+		logger.Fatalf("invalid name: %s, only alphabet, number and - are allowed, and the length should be 3 to 63 characters.", name)
 	}
 
 	compressor := compress.NewCompressor(c.String("compress"))
@@ -181,6 +172,8 @@ func format(c *cli.Context) error {
 		AccessKey:   c.String("access-key"),
 		SecretKey:   c.String("secret-key"),
 		Shards:      c.Int("shards"),
+		Capacity:    c.Uint64("capacity") << 30,
+		Inodes:      c.Uint64("inodes"),
 		BlockSize:   fixObjectSize(c.Int("block-size")),
 		Compression: c.String("compress"),
 	}
@@ -252,6 +245,16 @@ func formatFlags() *cli.Command {
 				Name:  "block-size",
 				Value: 4096,
 				Usage: "size of block in KiB",
+			},
+			&cli.Uint64Flag{
+				Name:  "capacity",
+				Value: 0,
+				Usage: "the limit for space in GiB",
+			},
+			&cli.Uint64Flag{
+				Name:  "inodes",
+				Value: 0,
+				Usage: "the limit for number of inodes",
 			},
 			&cli.StringFlag{
 				Name:  "compress",

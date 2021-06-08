@@ -16,7 +16,12 @@
 package meta
 
 import (
+	"os"
+	"strings"
 	"syscall"
+	"time"
+
+	"github.com/juicedata/juicefs/pkg/version"
 )
 
 const (
@@ -30,6 +35,8 @@ const (
 	Rmr = 1002
 	// Info is a message to get the internal info for file or directory.
 	Info = 1003
+	// FillCache is a message to build cache for target directories/files
+	FillCache = 1004
 )
 
 const (
@@ -129,14 +136,47 @@ type Summary struct {
 	Dirs   uint64
 }
 
+type SessionInfo struct {
+	Version    string
+	Hostname   string
+	MountPoint string
+	ProcessID  int
+}
+
+type Flock struct {
+	Inode Ino
+	Owner uint64
+	Ltype string
+}
+
+type Plock struct {
+	Inode   Ino
+	Owner   uint64
+	Records []byte // FIXME: loadLocks
+}
+
+// Session contains detailed information of a client session
+type Session struct {
+	Sid       uint64
+	Heartbeat time.Time
+	SessionInfo
+	Sustained []Ino   `json:",omitempty"`
+	Flocks    []Flock `json:",omitempty"`
+	Plocks    []Plock `json:",omitempty"`
+}
+
 // Meta is a interface for a meta service for file system.
 type Meta interface {
 	// Init is used to initialize a meta service.
 	Init(format Format, force bool) error
 	// Load loads the existing setting of a formatted volume from meta service.
 	Load() (*Format, error)
-	// NewSession create a new client session.
+	// NewSession creates a new client session.
 	NewSession() error
+	// GetSession retrieves information of session with sid
+	GetSession(sid uint64) (*Session, error)
+	// ListSessions returns all client sessions.
+	ListSessions() ([]*Session, error)
 
 	// StatFS returns summary statistics of a volume.
 	StatFS(ctx Context, totalspace, availspace, iused, iavail *uint64) syscall.Errno
@@ -144,6 +184,10 @@ type Meta interface {
 	Access(ctx Context, inode Ino, modemask uint8, attr *Attr) syscall.Errno
 	// Lookup returns the inode and attributes for the given entry in a directory.
 	Lookup(ctx Context, parent Ino, name string, inode *Ino, attr *Attr) syscall.Errno
+	// Resolve fetches the inode and attributes for an entry identified by the given path.
+	// ENOTSUP will be returned if there's no natural implementation for this operation or
+	// if there are any symlink following involved.
+	Resolve(ctx Context, parent Ino, path string, inode *Ino, attr *Attr) syscall.Errno
 	// GetAttr returns the attributes for given node.
 	GetAttr(ctx Context, inode Ino, attr *Attr) syscall.Errno
 	// SetAttr updates the attributes for given node.
@@ -203,16 +247,61 @@ type Meta interface {
 	// Setlk sets a file range lock on given file.
 	Setlk(ctx Context, inode Ino, owner uint64, block bool, ltype uint32, start, end uint64, pid uint32) syscall.Errno
 
-	// Summary returns the summary for given file or directory.
-	Summary(ctx Context, inode Ino, summary *Summary) syscall.Errno
-	// Rmr remove all the files and directories recursively.
-	Rmr(ctx Context, inode Ino, name string) syscall.Errno
-
 	// Compact all the chunks by merge small slices together
 	CompactAll(ctx Context) syscall.Errno
 	// ListSlices returns all slices used by all files.
-	ListSlices(ctx Context, slices *[]Slice) syscall.Errno
+	ListSlices(ctx Context, slices *[]Slice, delete bool) syscall.Errno
 
 	// OnMsg add a callback for the given message type.
 	OnMsg(mtype uint32, cb MsgCallback)
+}
+
+func removePassword(uri string) string {
+	p := strings.Index(uri, "@")
+	if p < 0 {
+		return uri
+	}
+	sp := strings.Index(uri, "://")
+	cp := strings.Index(uri[sp+3:], ":")
+	if cp < 0 || sp+3+cp > p {
+		return uri
+	}
+	return uri[:sp+3+cp] + uri[p:]
+}
+
+// NewClient creates a Meta client for given uri.
+func NewClient(uri string, conf *Config) Meta {
+	if !strings.Contains(uri, "://") {
+		uri = "redis://" + uri
+	}
+	logger.Infof("Meta address: %s", removePassword(uri))
+	if os.Getenv("META_PASSWORD") != "" {
+		p := strings.Index(uri, ":@")
+		if p > 0 {
+			uri = uri[:p+1] + os.Getenv("META_PASSWORD") + uri[p+1:]
+		}
+	}
+	var m Meta
+	var err error
+	if strings.HasPrefix(uri, "redis") {
+		m, err = newRedisMeta(uri, conf)
+	} else {
+		p := strings.Index(uri, "://")
+		if p < 0 {
+			logger.Fatalf("invalid uri: %s", uri)
+		}
+		m, err = newSQLMeta(uri[:p], uri[p+3:], conf)
+	}
+	if err != nil {
+		logger.Fatalf("Meta is not available: %s", err)
+	}
+	return m
+}
+
+func newSessionInfo() (*SessionInfo, error) {
+	host, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &SessionInfo{Version: version.Version(), Hostname: host, ProcessID: os.Getpid()}, nil
 }

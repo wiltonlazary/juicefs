@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -154,14 +155,14 @@ func handleInternalMsg(ctx Context, msg []byte) []byte {
 	case meta.Rmr:
 		inode := Ino(r.Get64())
 		name := string(r.Get(int(r.Get8())))
-		r := m.Rmr(ctx, inode, name)
+		r := meta.Remove(m, ctx, inode, name)
 		return []byte{uint8(r)}
 	case meta.Info:
 		var summary meta.Summary
 		inode := Ino(r.Get64())
 
 		wb := utils.NewBuffer(4)
-		r := m.Summary(ctx, inode, &summary)
+		r := meta.GetSummary(m, ctx, inode, &summary)
 		if r != 0 {
 			msg := r.Error()
 			wb.Put32(uint32(len(msg)))
@@ -186,6 +187,16 @@ func handleInternalMsg(ctx Context, msg []byte) []byte {
 		}
 		wb.Put32(uint32(w.Len()))
 		return append(wb.Bytes(), w.Bytes()...)
+	case meta.FillCache:
+		paths := strings.Split(string(r.Get(int(r.Get32()))), "\n")
+		concurrent := r.Get16()
+		background := r.Get8()
+		if background == 0 {
+			fillCache(paths, int(concurrent))
+		} else {
+			go fillCache(paths, int(concurrent))
+		}
+		return []byte{uint8(0)}
 	default:
 		logger.Warnf("unknown message type: %d", cmd)
 		return []byte{uint8(syscall.EINVAL & 0xff)}

@@ -41,17 +41,7 @@ func fsck(ctx *cli.Context) error {
 	if ctx.Args().Len() < 1 {
 		return fmt.Errorf("REDIS-URL is needed")
 	}
-	addr := ctx.Args().Get(0)
-	if !strings.Contains(addr, "://") {
-		addr = "redis://" + addr
-	}
-
-	logger.Infof("Meta address: %s", addr)
-	var rc = meta.RedisConfig{Retries: 10, Strict: true}
-	m, err := meta.NewRedisMeta(addr, &rc)
-	if err != nil {
-		logger.Fatalf("Meta: %s", err)
-	}
+	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true})
 	format, err := m.Load()
 	if err != nil {
 		logger.Fatalf("load setting: %s", err)
@@ -106,7 +96,7 @@ func fsck(ctx *cli.Context) error {
 	logger.Infof("Listing all slices ...")
 	var c = meta.NewContext(0, 0, []uint32{0})
 	var slices []meta.Slice
-	r := m.ListSlices(c, &slices)
+	r := m.ListSlices(c, &slices, false)
 	if r != 0 {
 		logger.Fatalf("list all slices: %s", r)
 	}

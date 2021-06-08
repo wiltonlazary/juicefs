@@ -87,3 +87,4 @@ Then add following configuration to `io.juicefs.<NAME>.plist` file for ensure Re
                 <string>homebrew.mxcl.redis</string>
         </dict>
 ```
+

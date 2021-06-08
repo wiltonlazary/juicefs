@@ -15,10 +15,12 @@
 
 package meta
 
+// Config for clients.
 type Config struct {
-	Addr      string
-	Password  string
-	IORetries int
+	Strict      bool // update ctime
+	Retries     int
+	CaseInsensi bool
+	MountPoint  string
 }
 
 type Format struct {
@@ -32,5 +34,7 @@ type Format struct {
 	Compression string
 	Shards      int
 	Partitions  int
+	Capacity    uint64
+	Inodes      uint64
 	EncryptKey  string `json:",omitempty"`
 }

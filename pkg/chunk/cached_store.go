@@ -49,6 +49,18 @@ var (
 		Name: "blockcache_miss",
 		Help: "missed read from cached block",
 	})
+	cacheWrites = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "blockcache_writes",
+		Help: "written cached block",
+	})
+	cacheDrops = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "blockcache_drops",
+		Help: "dropped block",
+	})
+	cacheEvicts = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "blockcache_evicts",
+		Help: "evicted cache blocks",
+	})
 	cacheHitBytes = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "blockcache_hit_bytes",
 		Help: "read bytes from cached block",
@@ -56,6 +68,20 @@ var (
 	cacheMissBytes = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "blockcache_miss_bytes",
 		Help: "missed bytes from cached block",
+	})
+	cacheWriteBytes = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "blockcache_write_bytes",
+		Help: "write bytes of cached block",
+	})
+	cacheReadHist = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "blockcache_read_hist_seconds",
+		Help:    "read cached block latency distribution",
+		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 20),
+	})
+	cacheWriteHist = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "blockcache_write_hist_seconds",
+		Help:    "write cached block latency distribution",
+		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 20),
 	})
 )
 
@@ -87,6 +113,18 @@ func (c *rChunk) key(indx int) string {
 
 func (c *rChunk) index(off int) int {
 	return off / c.store.conf.BlockSize
+}
+
+func (c *rChunk) keys() []string {
+	if c.length <= 0 {
+		return nil
+	}
+	lastIndx := (c.length - 1) / c.store.conf.BlockSize
+	keys := make([]string, lastIndx+1)
+	for i := 0; i <= lastIndx; i++ {
+		keys[i] = c.key(i)
+	}
+	return keys
 }
 
 func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err error) {
@@ -124,6 +162,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 
 	key := c.key(indx)
 	if c.store.conf.CacheSize > 0 {
+		start := time.Now()
 		r, err := c.store.bcache.load(key)
 		if err == nil {
 			n, err = r.ReadAt(p, int64(boff))
@@ -131,6 +170,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 			if err == nil {
 				cacheHits.Add(1)
 				cacheHitBytes.Add(float64(n))
+				cacheReadHist.Observe(time.Since(start).Seconds())
 				return n, nil
 			}
 			if f, ok := r.(*os.File); ok {
@@ -169,7 +209,7 @@ func (c *rChunk) ReadAt(ctx context.Context, page *Page, off int) (n int, err er
 		tmp.Acquire()
 		err := withTimeout(func() error {
 			defer tmp.Release()
-			return c.store.load(key, tmp, c.store.shouldCache(blockSize))
+			return c.store.load(key, tmp, c.store.shouldCache(blockSize), false)
 		}, c.store.conf.GetTimeout)
 		return tmp, err
 	})
@@ -202,7 +242,7 @@ func (c *rChunk) Remove() error {
 	}
 
 	lastIndx := (c.length - 1) / c.store.conf.BlockSize
-	deleted := false
+	var err error
 	for i := 0; i <= lastIndx; i++ {
 		// there could be multiple clients try to remove the same chunk in the same time,
 		// any of them should succeed if any blocks is removed
@@ -211,15 +251,11 @@ func (c *rChunk) Remove() error {
 		delete(c.store.pendingKeys, key)
 		c.store.pendingMutex.Unlock()
 		c.store.bcache.remove(key)
-		if c.delete(i) == nil {
-			deleted = true
+		if e := c.delete(i); e != nil {
+			err = e
 		}
 	}
-
-	if !deleted {
-		return errors.New("chunk not found")
-	}
-	return nil
+	return err
 }
 
 var pagePool = make(chan *Page, 128)
@@ -365,7 +401,7 @@ func (c *wChunk) syncUpload(key string, block *Page) {
 	buf.Data = buf.Data[:n]
 	if blen < c.store.conf.BlockSize {
 		// block will be freed after written into disk
-		c.store.bcache.cache(key, block)
+		c.store.bcache.cache(key, block, false)
 	}
 	block.Release()
 
@@ -592,7 +628,7 @@ type cachedStore struct {
 	seekable      bool
 }
 
-func (store *cachedStore) load(key string, page *Page, cache bool) (err error) {
+func (store *cachedStore) load(key string, page *Page, cache bool, forceCache bool) (err error) {
 	defer func() {
 		e := recover()
 		if e != nil {
@@ -639,7 +675,7 @@ func (store *cachedStore) load(key string, page *Page, cache bool) (err error) {
 			time.Since(start), tried)
 	}
 	if cache {
-		store.bcache.cache(key, page)
+		store.bcache.cache(key, page, forceCache)
 	}
 	return nil
 }
@@ -676,12 +712,18 @@ func NewCachedStore(storage object.ObjectStorage, config Config) ChunkStore {
 		}
 		p := NewOffPage(size)
 		defer p.Release()
-		_ = store.load(key, p, true)
+		_ = store.load(key, p, true, true)
 	})
 	_ = prometheus.Register(cacheHits)
 	_ = prometheus.Register(cacheHitBytes)
 	_ = prometheus.Register(cacheMiss)
 	_ = prometheus.Register(cacheMissBytes)
+	_ = prometheus.Register(cacheWrites)
+	_ = prometheus.Register(cacheWriteBytes)
+	_ = prometheus.Register(cacheDrops)
+	_ = prometheus.Register(cacheEvicts)
+	_ = prometheus.Register(cacheReadHist)
+	_ = prometheus.Register(cacheWriteHist)
 	_ = prometheus.Register(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "blockcache_blocks",
@@ -766,6 +808,29 @@ func (store *cachedStore) NewWriter(chunkid uint64) Writer {
 func (store *cachedStore) Remove(chunkid uint64, length int) error {
 	r := chunkForRead(chunkid, length, store)
 	return r.Remove()
+}
+
+func (store *cachedStore) FillCache(chunkid uint64, length uint32) error {
+	r := chunkForRead(chunkid, int(length), store)
+	keys := r.keys()
+	for _, k := range keys {
+		f, err := store.bcache.load(k)
+		if err == nil { // already cached
+			f.Close()
+			continue
+		}
+		size := parseObjOrigSize(k)
+		if size == 0 || size > store.conf.BlockSize {
+			logger.Warnf("Invalid size: %s %d", k, size)
+			continue
+		}
+		p := NewOffPage(size)
+		defer p.Release()
+		if err = store.load(k, p, true, true); err != nil {
+			logger.Warnf("Failed to load key: %s %s", k, err)
+		}
+	}
+	return nil // currently errors are skipped
 }
 
 var _ ChunkStore = &cachedStore{}
