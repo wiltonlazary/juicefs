@@ -166,7 +166,7 @@ func (c *memKV) txn(f func(kvTxn) error) error {
 	defer c.Unlock()
 	for k, ver := range tx.observed {
 		it := c.items[k]
-		if it.ver > ver {
+		if it != nil && it.ver > ver {
 			return fmt.Errorf("write conflict: %s %d > %d", k, it.ver, ver)
 		}
 	}

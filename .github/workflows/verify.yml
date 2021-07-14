@@ -49,6 +49,9 @@ jobs:
     - name: build tikv
       run: GOPATH=$HOME/go make juicefs.tikv
 
+    - name: build fdb
+      run: GOPATH=$HOME/go make juicefs.fdb
+
     - name: build windows
       run: GOPATH=$HOME/go make juicefs.exe
 
