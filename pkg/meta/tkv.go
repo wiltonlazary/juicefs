@@ -95,11 +95,13 @@ type kvMeta struct {
 }
 
 func newKVMeta(driver, addr string, conf *Config) (Meta, error) {
-	p := strings.Index(addr, "/")
 	var prefix string
-	if p > 0 {
-		prefix = addr[p+1:]
-		addr = addr[:p]
+	if driver == "tikv" {
+		p := strings.Index(addr, "/")
+		if p > 0 {
+			prefix = addr[p+1:]
+			addr = addr[:p]
+		}
 	}
 	client, err := newTkvClient(driver, addr)
 	if err != nil {
@@ -766,7 +768,7 @@ func (m *kvMeta) shouldRetry(err error) bool {
 		return false
 	}
 	// TODO: add other retryable errors here
-	return strings.Contains(err.Error(), "write conflict")
+	return strings.Contains(err.Error(), "write conflict") || strings.Contains(err.Error(), "conflict with another transaction") || strings.Contains(err.Error(), "Operation aborted")
 }
 
 func (m *kvMeta) txn(f func(tx kvTxn) error) error {
