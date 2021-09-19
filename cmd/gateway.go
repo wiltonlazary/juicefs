@@ -58,6 +58,21 @@ var mctx meta.Context
 
 func gatewayFlags() *cli.Command {
 	flags := append(clientFlags(),
+		&cli.Float64Flag{
+			Name:  "attr-cache",
+			Value: 1.0,
+			Usage: "attributes cache timeout in seconds",
+		},
+		&cli.Float64Flag{
+			Name:  "entry-cache",
+			Value: 0,
+			Usage: "file entry cache timeout in seconds",
+		},
+		&cli.Float64Flag{
+			Name:  "dir-entry-cache",
+			Value: 1.0,
+			Usage: "dir entry cache timeout in seconds",
+		},
 		&cli.StringFlag{
 			Name:  "access-log",
 			Usage: "path for JuiceFS access log",
@@ -182,7 +197,6 @@ func (g *GateWay) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, er
 		logger.Fatalf("object storage: %s", err)
 	}
 	logger.Infof("Data use %s", blob)
-	blob = object.WithMetrics(blob)
 	blob = object.NewLimited(blob, c.Int64("upload-limit")*1e6/8, c.Int64("download-limit")*1e6/8)
 
 	store := chunk.NewCachedStore(blob, chunkConf)
@@ -205,10 +219,13 @@ func (g *GateWay) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, er
 		Meta: &meta.Config{
 			Retries: 10,
 		},
-		Format:    format,
-		Version:   version.Version(),
-		AccessLog: c.String("access-log"),
-		Chunk:     &chunkConf,
+		Format:          format,
+		Version:         version.Version(),
+		AttrTimeout:     time.Millisecond * time.Duration(c.Float64("attr-cache")*1000),
+		EntryTimeout:    time.Millisecond * time.Duration(c.Float64("entry-cache")*1000),
+		DirEntryTimeout: time.Millisecond * time.Duration(c.Float64("dir-entry-cache")*1000),
+		AccessLog:       c.String("access-log"),
+		Chunk:           &chunkConf,
 	}
 
 	if !c.Bool("no-usage-report") {

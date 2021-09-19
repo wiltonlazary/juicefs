@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -82,11 +83,24 @@ func testMetaClient(t *testing.T, m Meta) {
 	if st := m.Lookup(ctx, 1, "d", &parent, attr); st != 0 {
 		t.Fatalf("lookup d: %s", st)
 	}
+	if st := m.Lookup(ctx, parent, ".", &inode, attr); st != 0 || inode != parent {
+		t.Fatalf("lookup .: %s", st)
+	}
+	if st := m.Lookup(ctx, parent, "..", &inode, attr); st != 0 || inode != 1 {
+		t.Fatalf("lookup ..: %s", st)
+	}
 	if st := m.Access(ctx, parent, 4, attr); st != 0 {
 		t.Fatalf("access d: %s", st)
 	}
 	if st := m.Create(ctx, parent, "f", 0650, 022, 0, &inode, attr); st != 0 {
 		t.Fatalf("create f: %s", st)
+	}
+	var tino Ino
+	if st := m.Lookup(ctx, inode, ".", &tino, attr); st != syscall.ENOTDIR {
+		t.Fatalf("lookup /d/f/.: %s", st)
+	}
+	if st := m.Lookup(ctx, inode, "..", &tino, attr); st != syscall.ENOTDIR {
+		t.Fatalf("lookup /d/f/..: %s", st)
 	}
 	defer m.Unlink(ctx, parent, "f")
 	if st := m.Rmdir(ctx, parent, "f"); st != syscall.ENOTDIR {
@@ -918,5 +932,82 @@ func testCopyFileRange(t *testing.T, m Meta) {
 				t.Fatalf("expect slice %d,%d: %+v, but got %+v", i, j, expectedChunks[i][j], s)
 			}
 		}
+	}
+}
+
+func TestCloseSessionRedis(t *testing.T) {
+	var conf Config
+	m, err := newRedisMeta("redis", "127.0.0.1/10", &conf)
+	if err != nil {
+		t.Skipf("redis is not available: %s", err)
+	}
+	m.(*redisMeta).rdb.FlushDB(context.Background())
+	testCloseSession(t, m)
+}
+
+func testCloseSession(t *testing.T, m Meta) {
+	_ = m.Init(Format{Name: "test"}, true)
+	if err := m.NewSession(); err != nil {
+		t.Fatalf("new session: %s", err)
+	}
+
+	ctx := Background
+	var inode Ino
+	var attr = &Attr{}
+	if st := m.Create(ctx, 1, "f", 0644, 022, 0, &inode, attr); st != 0 {
+		t.Fatalf("create f: %s", st)
+	}
+	if st := m.Flock(ctx, inode, 1, syscall.F_WRLCK, false); st != 0 {
+		t.Fatalf("flock wlock: %s", st)
+	}
+	if st := m.Setlk(ctx, inode, 1, false, syscall.F_WRLCK, 0x10000, 0x20000, 1); st != 0 {
+		t.Fatalf("plock wlock: %s", st)
+	}
+	if st := m.Open(ctx, inode, 2, attr); st != 0 {
+		t.Fatalf("open f: %s", st)
+	}
+	if st := m.Unlink(ctx, 1, "f"); st != 0 {
+		t.Fatalf("unlink f: %s", st)
+	}
+	var sid uint64
+	switch m := m.(type) {
+	case *redisMeta:
+		sid = uint64(m.sid)
+	case *dbMeta:
+		sid = m.sid
+	case *kvMeta:
+		sid = m.sid
+	}
+	s, err := m.GetSession(sid)
+	if err != nil {
+		t.Fatalf("get session: %s", err)
+	} else {
+		if len(s.Flocks) != 1 || len(s.Plocks) != 1 || len(s.Sustained) != 1 {
+			t.Fatalf("incorrect session: flock %d plock %d sustained %d", len(s.Flocks), len(s.Plocks), len(s.Sustained))
+		}
+	}
+	if err = m.CloseSession(); err != nil {
+		t.Fatalf("close session: %s", err)
+	}
+	if _, err = m.GetSession(sid); err == nil {
+		t.Fatalf("get a deleted session: %s", err)
+	}
+	switch m := m.(type) {
+	case *redisMeta:
+		s, err = m.getSession(strconv.FormatUint(sid, 10), true)
+	case *dbMeta:
+		s, err = m.getSession(&session{Sid: sid}, true)
+	case *kvMeta:
+		s, err = m.getSession(sid, true)
+	}
+	if err != nil {
+		t.Fatalf("get session: %s", err)
+	}
+	var empty SessionInfo
+	if s.SessionInfo != empty {
+		t.Fatalf("incorrect session info %+v", s.SessionInfo)
+	}
+	if len(s.Flocks) != 0 || len(s.Plocks) != 0 || len(s.Sustained) != 0 {
+		t.Fatalf("incorrect session: flock %d plock %d sustained %d", len(s.Flocks), len(s.Plocks), len(s.Sustained))
 	}
 }

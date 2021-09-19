@@ -34,15 +34,23 @@ Of course, if you just want to quickly evaluate JuiceFS, you can use Docker to q
 
 ```shell
 $ sudo docker run -d --name minio \
-	-v $PWD/minio-data:/data \
-	-p 9000:9000 \
-	--restart unless-stopped \
-	minio/minio server /data
+    -p 9000:9000 \
+    -p 9900:9900 \
+    -v $PWD/minio-data:/data \
+    --restart unless-stopped \
+    minio/minio server /data --console-address ":9900"
 ```
+
+Then, access the service:
+
+- **MinIO Web Console**：http://127.0.0.1:9900
+- **MinIO API**：http://127.0.0.1:9000
+
+The initial Access Key and Secret Key of the root user are both `minioadmin`.
 
 After the container is successfully created, use `http://127.0.0.1:9000` to access the MinIO management interface. The initial Access Key and Secret Key of the root user are both `minioadmin`.
 
-> **Note**: The above command maps the data path of MinIO object storage to the `minio-data` folder in the current directory, and you can modify the location of the data persistent storage as needed.
+> **Note**: The latest MinIO includes a new web console, the above command sets and maps port `9900` through  `--console-address ":9900"`  option. In addtion, it maps the data path in the MinIO container to the `minio-data` folder in the current directory. You can modify these options as needed.
 
 ## 3. JuiceFS Client
 
@@ -85,7 +93,7 @@ After executing the command, you will see output similar to the following, indic
 ```shell
 2021/04/29 23:01:18.352256 juicefs[34223] <INFO>: Meta address: redis://127.0.0.1:6379/1
 2021/04/29 23:01:18.354252 juicefs[34223] <INFO>: Ping redis: 132.185µs
-2021/04/29 23:01:18.354758 juicefs[34223] <INFO>: Data uses 127.0.0.1:9000/pics/
+2021/04/29 23:01:18.354758 juicefs[34223] <INFO>: Data use minio://127.0.0.1:9000/pics/pics/
 2021/04/29 23:01:18.361674 juicefs[34223] <INFO>: Volume is formatted as {Name:pics UUID:9c0fab76-efd0-43fd-a81e-ae0916e2fc90 Storage:minio Bucket:http://127.0.0.1:9000/pics AccessKey:minioadmin SecretKey:removed BlockSize:4096 Compression:none Partitions:0 EncryptKey:}
 ```
 
@@ -108,7 +116,7 @@ After executing the command, you will see output similar to the following, indic
 ```shell
 2021/04/29 23:22:25.838419 juicefs[37999] <INFO>: Meta address: redis://127.0.0.1:6379/1
 2021/04/29 23:22:25.839184 juicefs[37999] <INFO>: Ping redis: 67.625µs
-2021/04/29 23:22:25.839399 juicefs[37999] <INFO>: Data use 127.0.0.1:9000/pics/
+2021/04/29 23:22:25.839399 juicefs[37999] <INFO>: Data use minio://127.0.0.1:9000/pics/pics/
 2021/04/29 23:22:25.839554 juicefs[37999] <INFO>: Cache: /var/jfsCache/9c0fab76-efd0-43fd-a81e-ae0916e2fc90 capacity: 1024 MB
 2021/04/29 23:22:26.340509 juicefs[37999] <INFO>: OK, pics is ready at /mnt/jfs
 ```

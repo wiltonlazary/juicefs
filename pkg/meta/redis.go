@@ -89,6 +89,7 @@ type redisMeta struct {
 	deleting     chan int
 	symlinks     *sync.Map
 	msgCallbacks *msgCallbacks
+	umounting    bool
 
 	shaLookup  string // The SHA returned by Redis for the loaded `scriptLookup`
 	shaResolve string // The SHA returned by Redis for the loaded `scriptResolve`
@@ -312,6 +313,17 @@ func (r *redisMeta) NewSession() error {
 	go r.refreshSession()
 	go r.cleanupDeletedFiles()
 	go r.cleanupSlices()
+	return nil
+}
+
+func (r *redisMeta) CloseSession() error {
+	if r.conf.ReadOnly {
+		return nil
+	}
+	r.Lock()
+	r.umounting = true
+	r.Unlock()
+	r.cleanStaleSession(r.sid, true)
 	return nil
 }
 
@@ -591,6 +603,9 @@ func (r *redisMeta) StatFS(ctx Context, totalspace, availspace, iused, iavail *u
 		}
 	} else {
 		*iavail = 10 << 20
+		for *iused*10 > (*iused+*iavail)*8 {
+			*iavail *= 2
+		}
 	}
 	return 0
 }
@@ -642,11 +657,39 @@ func (r *redisMeta) resolveCase(ctx Context, parent Ino, name string) *Entry {
 }
 
 func (r *redisMeta) Lookup(ctx Context, parent Ino, name string, inode *Ino, attr *Attr) syscall.Errno {
+	if inode == nil || attr == nil {
+		return syscall.EINVAL
+	}
 	defer timeit(time.Now())
 	var foundIno Ino
 	var encodedAttr []byte
 	var err error
 	parent = r.checkRoot(parent)
+	if name == ".." {
+		if parent == r.root {
+			name = "."
+		} else {
+			if st := r.GetAttr(ctx, parent, attr); st != 0 {
+				return st
+			}
+			if attr.Typ != TypeDirectory {
+				return syscall.ENOTDIR
+			}
+			*inode = attr.Parent
+			return r.GetAttr(ctx, *inode, attr)
+		}
+	}
+	if name == "." {
+		st := r.GetAttr(ctx, parent, attr)
+		if st != 0 {
+			return st
+		}
+		if attr.Typ != TypeDirectory {
+			return syscall.ENOTDIR
+		}
+		*inode = parent
+		return 0
+	}
 	entryKey := r.entryKey(parent)
 	if len(r.shaLookup) > 0 && attr != nil && !r.conf.CaseInsensi {
 		var res interface{}
@@ -702,17 +745,13 @@ func (r *redisMeta) Lookup(ctx Context, parent Ino, name string, inode *Ino, att
 		if err != nil {
 			return errno(err)
 		}
-		if attr != nil {
-			encodedAttr, err = r.rdb.Get(ctx, r.inodeKey(foundIno)).Bytes()
-		}
+		encodedAttr, err = r.rdb.Get(ctx, r.inodeKey(foundIno)).Bytes()
 	}
 
-	if err == nil && attr != nil {
+	if err == nil {
 		r.parseAttr(encodedAttr, attr)
 	}
-	if inode != nil {
-		*inode = foundIno
-	}
+	*inode = foundIno
 	return errno(err)
 }
 
@@ -1370,7 +1409,7 @@ func (r *redisMeta) Unlink(ctx Context, parent Ino, name string) syscall.Errno {
 	var attr Attr
 	eno := r.txn(ctx, func(tx *redis.Tx) error {
 		rs, _ := tx.MGet(ctx, r.inodeKey(parent), r.inodeKey(inode)).Result()
-		if rs[0] == nil || rs[1] == nil {
+		if rs[0] == nil {
 			return redis.Nil
 		}
 		var pattr Attr
@@ -1384,11 +1423,20 @@ func (r *redisMeta) Unlink(ctx Context, parent Ino, name string) syscall.Errno {
 		pattr.Ctime = now.Unix()
 		pattr.Ctimensec = uint32(now.Nanosecond())
 		attr = Attr{}
-		r.parseAttr([]byte(rs[1].(string)), &attr)
-		attr.Ctime = now.Unix()
-		attr.Ctimensec = uint32(now.Nanosecond())
-		if ctx.Uid() != 0 && pattr.Mode&01000 != 0 && ctx.Uid() != pattr.Uid && ctx.Uid() != attr.Uid {
-			return syscall.EACCES
+		opened = false
+		if rs[1] != nil {
+			r.parseAttr([]byte(rs[1].(string)), &attr)
+			attr.Ctime = now.Unix()
+			attr.Ctimensec = uint32(now.Nanosecond())
+			if ctx.Uid() != 0 && pattr.Mode&01000 != 0 && ctx.Uid() != pattr.Uid && ctx.Uid() != attr.Uid {
+				return syscall.EACCES
+			}
+			attr.Nlink--
+			if _type == TypeFile && attr.Nlink == 0 {
+				opened = r.of.IsOpen(inode)
+			}
+		} else {
+			logger.Warnf("no attribute for inode %d (%d, %s)", inode, parent, name)
 		}
 
 		buf, err := tx.HGet(ctx, r.entryKey(parent), name).Bytes()
@@ -1398,12 +1446,6 @@ func (r *redisMeta) Unlink(ctx Context, parent Ino, name string) syscall.Errno {
 		_type2, inode2 := r.parseEntry(buf)
 		if _type2 != _type || inode2 != inode {
 			return syscall.EAGAIN
-		}
-
-		attr.Nlink--
-		opened = false
-		if _type == TypeFile && attr.Nlink == 0 {
-			opened = r.of.IsOpen(inode)
 		}
 
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -1477,12 +1519,11 @@ func (r *redisMeta) Rmdir(ctx Context, parent Ino, name string) syscall.Errno {
 
 	return r.txn(ctx, func(tx *redis.Tx) error {
 		rs, _ := tx.MGet(ctx, r.inodeKey(parent), r.inodeKey(inode)).Result()
-		if rs[0] == nil || rs[1] == nil {
+		if rs[0] == nil {
 			return redis.Nil
 		}
 		var pattr, attr Attr
 		r.parseAttr([]byte(rs[0].(string)), &pattr)
-		r.parseAttr([]byte(rs[1].(string)), &attr)
 		if pattr.Typ != TypeDirectory {
 			return syscall.ENOTDIR
 		}
@@ -1509,8 +1550,13 @@ func (r *redisMeta) Rmdir(ctx Context, parent Ino, name string) syscall.Errno {
 		if cnt > 0 {
 			return syscall.ENOTEMPTY
 		}
-		if ctx.Uid() != 0 && pattr.Mode&01000 != 0 && ctx.Uid() != pattr.Uid && ctx.Uid() != attr.Uid {
-			return syscall.EACCES
+		if rs[1] != nil {
+			r.parseAttr([]byte(rs[1].(string)), &attr)
+			if ctx.Uid() != 0 && pattr.Mode&01000 != 0 && ctx.Uid() != pattr.Uid && ctx.Uid() != attr.Uid {
+				return syscall.EACCES
+			}
+		} else {
+			logger.Warnf("no attribute for inode %d (%d, %s)", inode, parent, name)
 		}
 
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -1787,12 +1833,12 @@ func (r *redisMeta) Rename(ctx Context, parentSrc Ino, nameSrc string, parentDst
 					}
 				}
 			}
-			pipe.Set(ctx, r.inodeKey(parentSrc), r.marshal(&sattr), 0)
+			if parentDst != parentSrc {
+				pipe.Set(ctx, r.inodeKey(parentSrc), r.marshal(&sattr), 0)
+			}
 			pipe.Set(ctx, r.inodeKey(ino), r.marshal(&iattr), 0)
 			pipe.HSet(ctx, r.entryKey(parentDst), nameDst, buf)
-			if parentDst != parentSrc {
-				pipe.Set(ctx, r.inodeKey(parentDst), r.marshal(&dattr), 0)
-			}
+			pipe.Set(ctx, r.inodeKey(parentDst), r.marshal(&dattr), 0)
 			return nil
 		})
 		return err
@@ -1966,71 +2012,69 @@ func (r *redisMeta) Readdir(ctx Context, inode Ino, plus uint8, entries *[]*Entr
 	return 0
 }
 
-func (r *redisMeta) cleanStaleSession(sid int64) {
+func (r *redisMeta) cleanStaleSession(sid int64, sync bool) {
+	// release locks
 	var ctx = Background
-	key := r.sustained(sid)
+	key := r.lockedKey(sid)
 	inodes, err := r.rdb.SMembers(ctx, key).Result()
 	if err != nil {
 		logger.Warnf("SMembers %s: %s", key, err)
 		return
 	}
-	for _, sinode := range inodes {
-		inode, _ := strconv.ParseInt(sinode, 10, 0)
-		if err := r.deleteInode(Ino(inode)); err != nil {
-			logger.Errorf("Failed to delete inode %d: %s", inode, err)
-		} else {
-			r.rdb.SRem(ctx, key, sinode)
-		}
-	}
-	if len(inodes) == 0 {
-		r.rdb.ZRem(ctx, allSessions, strconv.Itoa(int(sid)))
-		r.rdb.HDel(ctx, sessionInfos, strconv.Itoa(int(sid)))
-		logger.Infof("cleanup session %d", sid)
-	}
-}
-
-func (r *redisMeta) cleanStaleLocks(ssid string) {
-	var ctx = Background
-	key := "locked" + ssid
-	inodes, err := r.rdb.SMembers(ctx, key).Result()
-	if err != nil {
-		logger.Warnf("SMembers %s: %s", key, err)
-		return
-	}
+	ssid := strconv.FormatInt(sid, 10)
 	for _, k := range inodes {
 		owners, _ := r.rdb.HKeys(ctx, k).Result()
 		for _, o := range owners {
 			if strings.Split(o, "_")[0] == ssid {
 				err = r.rdb.HDel(ctx, k, o).Err()
-				logger.Infof("cleanup lock on %s from session %s: %s", k, ssid, err)
+				logger.Infof("cleanup lock on %s from session %d: %s", k, sid, err)
 			}
 		}
 		r.rdb.SRem(ctx, key, k)
 	}
+
+	key = r.sustained(sid)
+	inodes, err = r.rdb.SMembers(ctx, key).Result()
+	if err != nil {
+		logger.Warnf("SMembers %s: %s", key, err)
+		return
+	}
+	done := true
+	for _, sinode := range inodes {
+		inode, _ := strconv.ParseInt(sinode, 10, 0)
+		if err := r.deleteInode(Ino(inode), sync); err != nil {
+			logger.Errorf("Failed to delete inode %d: %s", inode, err)
+			done = false
+		} else {
+			r.rdb.SRem(ctx, key, sinode)
+		}
+	}
+	if done {
+		r.rdb.HDel(ctx, sessionInfos, ssid)
+		r.rdb.ZRem(ctx, allSessions, ssid)
+		logger.Infof("cleanup session %d", sid)
+	}
 }
 
 func (r *redisMeta) cleanStaleSessions() {
-	// TODO: once per minute
-	now := time.Now()
-	var ctx = Background
-	rng := &redis.ZRangeBy{Max: strconv.Itoa(int(now.Add(time.Minute * -5).Unix())), Count: 100}
-	staleSessions, _ := r.rdb.ZRangeByScore(ctx, allSessions, rng).Result()
+	rng := &redis.ZRangeBy{Max: strconv.Itoa(int(time.Now().Add(time.Minute * -5).Unix())), Count: 100}
+	staleSessions, _ := r.rdb.ZRangeByScore(Background, allSessions, rng).Result()
 	for _, ssid := range staleSessions {
 		sid, _ := strconv.Atoi(ssid)
-		r.cleanStaleSession(int64(sid))
-	}
-
-	rng = &redis.ZRangeBy{Max: strconv.Itoa(int(now.Add(time.Minute * -3).Unix())), Count: 100}
-	staleSessions, _ = r.rdb.ZRangeByScore(ctx, allSessions, rng).Result()
-	for _, sid := range staleSessions {
-		r.cleanStaleLocks(sid)
+		r.cleanStaleSession(int64(sid), false)
 	}
 }
 
 func (r *redisMeta) refreshSession() {
 	for {
 		time.Sleep(time.Minute)
+		r.Lock()
+		if r.umounting {
+			r.Unlock()
+			return
+		}
 		r.rdb.ZAdd(Background, allSessions, &redis.Z{Score: float64(time.Now().Unix()), Member: strconv.Itoa(int(r.sid))})
+		r.Unlock()
 		if _, err := r.Load(); err != nil {
 			logger.Warnf("reload setting: %s", err)
 		}
@@ -2038,7 +2082,7 @@ func (r *redisMeta) refreshSession() {
 	}
 }
 
-func (r *redisMeta) deleteInode(inode Ino) error {
+func (r *redisMeta) deleteInode(inode Ino, sync bool) error {
 	var attr Attr
 	var ctx = Background
 	a, err := r.rdb.Get(ctx, r.inodeKey(inode)).Bytes()
@@ -2057,7 +2101,11 @@ func (r *redisMeta) deleteInode(inode Ino) error {
 		return nil
 	})
 	if err == nil {
-		go r.deleteFile(inode, attr.Length, "")
+		if sync {
+			r.deleteFile(inode, attr.Length, "")
+		} else {
+			go r.deleteFile(inode, attr.Length, "")
+		}
 	}
 	return err
 }
@@ -2087,7 +2135,7 @@ func (r *redisMeta) Close(ctx Context, inode Ino) syscall.Errno {
 		if r.removedFiles[inode] {
 			delete(r.removedFiles, inode)
 			go func() {
-				if err := r.deleteInode(inode); err == nil {
+				if err := r.deleteInode(inode, false); err == nil {
 					r.rdb.SRem(ctx, r.sustained(r.sid), strconv.Itoa(int(inode)))
 				}
 			}()
@@ -2615,7 +2663,9 @@ func (r *redisMeta) compactChunk(inode Ino, indx uint32, force bool) {
 	logger.Debugf("compact %d:%d: skipped %d slices (%d bytes) %d slices (%d bytes)", inode, indx, skipped, pos, len(ss), size)
 	err = r.newMsg(CompactChunk, chunks, chunkid)
 	if err != nil {
-		logger.Warnf("compact %d %d with %d slices: %s", inode, indx, len(ss), err)
+		if !strings.Contains(err.Error(), "not exist") && !strings.Contains(err.Error(), "not found") {
+			logger.Warnf("compact %d %d with %d slices: %s", inode, indx, len(ss), err)
+		}
 		return
 	}
 	var rs []*redis.IntCmd
@@ -2772,7 +2822,7 @@ func (r *redisMeta) cleanupLeakedInodes(delete bool) {
 				if _, ok := foundInodes[Ino(ino)]; !ok && time.Unix(attr.Atime, 0).Before(cutoff) {
 					logger.Infof("found dangling inode: %s %+v", keys[i], attr)
 					if delete {
-						err = r.deleteInode(Ino(ino))
+						err = r.deleteInode(Ino(ino), false)
 						if err != nil {
 							logger.Errorf("delete leaked inode %d : %s", ino, err)
 						}

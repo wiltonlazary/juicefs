@@ -151,6 +151,7 @@ type dbMeta struct {
 	newInodes    int64
 	usedSpace    int64
 	usedInodes   int64
+	umounting    bool
 
 	freeMu     sync.Mutex
 	freeInodes freeID
@@ -383,6 +384,17 @@ func (m *dbMeta) NewSession() error {
 	go m.cleanupDeletedFiles()
 	go m.cleanupSlices()
 	go m.flushStats()
+	return nil
+}
+
+func (m *dbMeta) CloseSession() error {
+	if m.conf.ReadOnly {
+		return nil
+	}
+	m.Lock()
+	m.umounting = true
+	m.Unlock()
+	m.cleanStaleSession(m.sid, true)
 	return nil
 }
 
@@ -678,13 +690,44 @@ func (m *dbMeta) StatFS(ctx Context, totalspace, availspace, iused, iavail *uint
 		}
 	} else {
 		*iavail = 10 << 20
+		for *iused*10 > (*iused+*iavail)*8 {
+			*iavail *= 2
+		}
 	}
 	return 0
 }
 
 func (m *dbMeta) Lookup(ctx Context, parent Ino, name string, inode *Ino, attr *Attr) syscall.Errno {
+	if inode == nil || attr == nil {
+		return syscall.EINVAL
+	}
 	defer timeit(time.Now())
 	parent = m.checkRoot(parent)
+	if name == ".." {
+		if parent == m.root {
+			name = "."
+		} else {
+			if st := m.GetAttr(ctx, parent, attr); st != 0 {
+				return st
+			}
+			if attr.Typ != TypeDirectory {
+				return syscall.ENOTDIR
+			}
+			*inode = attr.Parent
+			return m.GetAttr(ctx, *inode, attr)
+		}
+	}
+	if name == "." {
+		st := m.GetAttr(ctx, parent, attr)
+		if st != 0 {
+			return st
+		}
+		if attr.Typ != TypeDirectory {
+			return syscall.ENOTDIR
+		}
+		*inode = parent
+		return 0
+	}
 	dbSession := m.engine.Table(&edge{})
 	if attr != nil {
 		dbSession = dbSession.Join("INNER", &node{}, "jfs_edge.inode=jfs_node.inode")
@@ -698,23 +741,14 @@ func (m *dbMeta) Lookup(ctx Context, parent Ino, name string, inode *Ino, attr *
 		if m.conf.CaseInsensi {
 			// TODO: in SQL
 			if e := m.resolveCase(ctx, parent, name); e != nil {
-				if inode != nil {
-					*inode = e.Inode
-				}
-				if attr != nil {
-					return m.GetAttr(ctx, *inode, attr)
-				}
-				return 0
+				*inode = e.Inode
+				return m.GetAttr(ctx, *inode, attr)
 			}
 		}
 		return syscall.ENOENT
 	}
-	if inode != nil {
-		*inode = nn.Inode
-	}
-	if attr != nil {
-		m.parseAttr(&nn.node, attr)
-	}
+	*inode = nn.Inode
+	m.parseAttr(&nn.node, attr)
 	return 0
 }
 
@@ -1254,23 +1288,24 @@ func (m *dbMeta) Unlink(ctx Context, parent Ino, name string) syscall.Errno {
 		if err != nil {
 			return err
 		}
-		if !ok {
-			return syscall.ENOENT
-		}
-		if ctx.Uid() != 0 && pn.Mode&01000 != 0 && ctx.Uid() != pn.Uid && ctx.Uid() != n.Uid {
-			return syscall.EACCES
+		now := time.Now().UnixNano() / 1e3
+		opened = false
+		if ok {
+			if ctx.Uid() != 0 && pn.Mode&01000 != 0 && ctx.Uid() != pn.Uid && ctx.Uid() != n.Uid {
+				return syscall.EACCES
+			}
+			n.Nlink--
+			n.Ctime = now
+			if n.Type == TypeFile && n.Nlink == 0 {
+				opened = m.of.IsOpen(e.Inode)
+			}
+		} else {
+			logger.Warnf("no attribute for inode %d (%d, %s)", e.Inode, parent, name)
 		}
 		defer func() { m.of.InvalidateChunk(e.Inode, 0xFFFFFFFE) }()
 
-		now := time.Now().UnixNano() / 1e3
 		pn.Mtime = now
 		pn.Ctime = now
-		n.Nlink--
-		n.Ctime = now
-		opened = false
-		if e.Type == TypeFile && n.Nlink == 0 {
-			opened = m.of.IsOpen(e.Inode)
-		}
 
 		if _, err := s.Delete(&edge{Parent: parent, Name: e.Name}); err != nil {
 			return err
@@ -1380,11 +1415,10 @@ func (m *dbMeta) Rmdir(ctx Context, parent Ino, name string) syscall.Errno {
 			if err != nil {
 				return err
 			}
-			if !ok {
-				return syscall.ENOENT
-			}
-			if ctx.Uid() != n.Uid {
+			if ok && ctx.Uid() != n.Uid {
 				return syscall.EACCES
+			} else if !ok {
+				logger.Warnf("no attribute for inode %d (%d, %s)", e.Inode, parent, name)
 			}
 		}
 		exist, err := s.Exist(&edge{Parent: e.Inode})
@@ -1631,16 +1665,16 @@ func (m *dbMeta) Rename(ctx Context, parentSrc Ino, nameSrc string, parentDst In
 				return err
 			}
 		}
-		if _, err := s.Cols("nlink", "mtime", "ctime").Update(&spn, &node{Inode: parentSrc}); err != nil {
-			return err
+		if parentDst != parentSrc {
+			if _, err := s.Cols("nlink", "mtime", "ctime").Update(&spn, &node{Inode: parentSrc}); err != nil {
+				return err
+			}
 		}
 		if _, err := s.Cols("ctime").Update(&sn, &node{Inode: sn.Inode}); err != nil {
 			return err
 		}
-		if parentDst != parentSrc {
-			if _, err := s.Cols("nlink", "mtime", "ctime").Update(&dpn, &node{Inode: parentDst}); err != nil {
-				return err
-			}
+		if _, err := s.Cols("nlink", "mtime", "ctime").Update(&dpn, &node{Inode: parentDst}); err != nil {
+			return err
 		}
 		return err
 	})
@@ -1770,7 +1804,7 @@ func (m *dbMeta) Readdir(ctx Context, inode Ino, plus uint8, entries *[]*Entry) 
 	return 0
 }
 
-func (m *dbMeta) cleanStaleSession(sid uint64) {
+func (m *dbMeta) cleanStaleSession(sid uint64, sync bool) {
 	// release locks
 	_, _ = m.engine.Delete(flock{Sid: sid})
 	_, _ = m.engine.Delete(plock{Sid: sid})
@@ -1792,7 +1826,7 @@ func (m *dbMeta) cleanStaleSession(sid uint64) {
 
 	done := true
 	for _, inode := range inodes {
-		if err := m.deleteInode(inode); err != nil {
+		if err := m.deleteInode(inode, sync); err != nil {
 			logger.Errorf("Failed to delete inode %d: %s", inode, err)
 			done = false
 		} else {
@@ -1802,7 +1836,6 @@ func (m *dbMeta) cleanStaleSession(sid uint64) {
 			})
 		}
 	}
-
 	if done {
 		_ = m.txn(func(ses *xorm.Session) error {
 			_, err = ses.Delete(&session{Sid: sid})
@@ -1813,7 +1846,6 @@ func (m *dbMeta) cleanStaleSession(sid uint64) {
 }
 
 func (m *dbMeta) cleanStaleSessions() {
-	// TODO: once per minute
 	var s session
 	rows, err := m.engine.Where("Heartbeat < ?", time.Now().Add(time.Minute*-5).Unix()).Rows(&s)
 	if err != nil {
@@ -1828,13 +1860,18 @@ func (m *dbMeta) cleanStaleSessions() {
 	}
 	rows.Close()
 	for _, sid := range ids {
-		m.cleanStaleSession(sid)
+		m.cleanStaleSession(sid, false)
 	}
 }
 
 func (m *dbMeta) refreshSession() {
 	for {
 		time.Sleep(time.Minute)
+		m.Lock()
+		if m.umounting {
+			m.Unlock()
+			return
+		}
 		_ = m.txn(func(ses *xorm.Session) error {
 			n, err := ses.Cols("Heartbeat").Update(&session{Heartbeat: time.Now().Unix()}, &session{Sid: m.sid})
 			if err == nil && n == 0 {
@@ -1845,6 +1882,7 @@ func (m *dbMeta) refreshSession() {
 			}
 			return err
 		})
+		m.Unlock()
 		if _, err := m.Load(); err != nil {
 			logger.Warnf("reload setting: %s", err)
 		}
@@ -1852,7 +1890,7 @@ func (m *dbMeta) refreshSession() {
 	}
 }
 
-func (m *dbMeta) deleteInode(inode Ino) error {
+func (m *dbMeta) deleteInode(inode Ino, sync bool) error {
 	var n = node{Inode: inode}
 	var newSpace int64
 	err := m.txn(func(s *xorm.Session) error {
@@ -1872,7 +1910,11 @@ func (m *dbMeta) deleteInode(inode Ino) error {
 	})
 	if err == nil {
 		m.updateStats(newSpace, -1)
-		go m.deleteFile(inode, n.Length)
+		if sync {
+			m.deleteFile(inode, n.Length)
+		} else {
+			go m.deleteFile(inode, n.Length)
+		}
 	}
 	return err
 }
@@ -1901,7 +1943,7 @@ func (m *dbMeta) Close(ctx Context, inode Ino) syscall.Errno {
 		if m.removedFiles[inode] {
 			delete(m.removedFiles, inode)
 			go func() {
-				if err := m.deleteInode(inode); err == nil {
+				if err := m.deleteInode(inode, false); err == nil {
 					_ = m.txn(func(ses *xorm.Session) error {
 						_, err := ses.Delete(&sustained{m.sid, inode})
 						return err
@@ -2336,7 +2378,9 @@ func (m *dbMeta) compactChunk(inode Ino, indx uint32, force bool) {
 	logger.Debugf("compact %d:%d: skipped %d slices (%d bytes) %d slices (%d bytes)", inode, indx, skipped, pos, len(ss), size)
 	err = m.newMsg(CompactChunk, chunks, chunkid)
 	if err != nil {
-		logger.Warnf("compact %d %d with %d slices: %s", inode, indx, len(ss), err)
+		if !strings.Contains(err.Error(), "not exist") && !strings.Contains(err.Error(), "not found") {
+			logger.Warnf("compact %d %d with %d slices: %s", inode, indx, len(ss), err)
+		}
 		return
 	}
 	err = m.txn(func(ses *xorm.Session) error {

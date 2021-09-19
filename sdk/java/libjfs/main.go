@@ -213,30 +213,33 @@ func freeHandle(fd int) {
 }
 
 type javaConf struct {
-	MetaURL        string  `json:"meta"`
-	ReadOnly       bool    `json:"readOnly"`
-	OpenCache      float64 `json:"openCache"`
-	CacheDir       string  `json:"cacheDir"`
-	CacheSize      int64   `json:"cacheSize"`
-	FreeSpace      string  `json:"freeSpace"`
-	AutoCreate     bool    `json:"autoCreate"`
-	CacheFullBlock bool    `json:"cacheFullBlock"`
-	Writeback      bool    `json:"writeback"`
-	MemorySize     int     `json:"memorySize"`
-	Prefetch       int     `json:"prefetch"`
-	Readahead      int     `json:"readahead"`
-	UploadLimit    int     `json:"uploadLimit"`
-	DownloadLimit  int     `json:"downloadLimit"`
-	MaxUploads     int     `json:"maxUploads"`
-	GetTimeout     int     `json:"getTimeout"`
-	PutTimeout     int     `json:"putTimeout"`
-	FastResolve    bool    `json:"fastResolve"`
-	Debug          bool    `json:"debug"`
-	NoUsageReport  bool    `json:"noUsageReport"`
-	AccessLog      string  `json:"accessLog"`
-	PushGateway    string  `json:"pushGateway"`
-	PushInterval   int     `json:"pushInterval"`
-	PushAuth       string  `json:"pushAuth"`
+	MetaURL         string  `json:"meta"`
+	ReadOnly        bool    `json:"readOnly"`
+	OpenCache       float64 `json:"openCache"`
+	CacheDir        string  `json:"cacheDir"`
+	CacheSize       int64   `json:"cacheSize"`
+	FreeSpace       string  `json:"freeSpace"`
+	AutoCreate      bool    `json:"autoCreate"`
+	CacheFullBlock  bool    `json:"cacheFullBlock"`
+	Writeback       bool    `json:"writeback"`
+	MemorySize      int     `json:"memorySize"`
+	Prefetch        int     `json:"prefetch"`
+	Readahead       int     `json:"readahead"`
+	UploadLimit     int     `json:"uploadLimit"`
+	DownloadLimit   int     `json:"downloadLimit"`
+	MaxUploads      int     `json:"maxUploads"`
+	GetTimeout      int     `json:"getTimeout"`
+	PutTimeout      int     `json:"putTimeout"`
+	FastResolve     bool    `json:"fastResolve"`
+	AttrTimeout     float64 `json:"attrTimeout"`
+	EntryTimeout    float64 `json:"entryTimeout"`
+	DirEntryTimeout float64 `json:"dirEntryTimeout"`
+	Debug           bool    `json:"debug"`
+	NoUsageReport   bool    `json:"noUsageReport"`
+	AccessLog       string  `json:"accessLog"`
+	PushGateway     string  `json:"pushGateway"`
+	PushInterval    int     `json:"pushInterval"`
+	PushAuth        string  `json:"pushAuth"`
 }
 
 func getOrCreate(name, user, group, superuser, supergroup string, f func() *fs.FileSystem) uintptr {
@@ -361,7 +364,6 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			logger.Fatalf("object storage: %s", err)
 		}
 		logger.Infof("Data use %s", blob)
-		blob = object.WithMetrics(blob)
 		blob = object.NewLimited(blob, int64(jConf.UploadLimit)*1e6/8, int64(jConf.DownloadLimit)*1e6/8)
 
 		var freeSpaceRatio = 0.1
@@ -413,10 +415,13 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			Meta: &meta.Config{
 				Retries: 10,
 			},
-			Format:      format,
-			Chunk:       &chunkConf,
-			AccessLog:   jConf.AccessLog,
-			FastResolve: jConf.FastResolve,
+			Format:          format,
+			Chunk:           &chunkConf,
+			AttrTimeout:     time.Millisecond * time.Duration(jConf.AttrTimeout*1000),
+			EntryTimeout:    time.Millisecond * time.Duration(jConf.EntryTimeout*1000),
+			DirEntryTimeout: time.Millisecond * time.Duration(jConf.DirEntryTimeout*1000),
+			AccessLog:       jConf.AccessLog,
+			FastResolve:     jConf.FastResolve,
 		}
 		if !jConf.NoUsageReport {
 			go usage.ReportUsage(m, "java-sdk "+version.Version())

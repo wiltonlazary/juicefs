@@ -149,7 +149,6 @@ func mount(c *cli.Context) error {
 		logger.Fatalf("object storage: %s", err)
 	}
 	logger.Infof("Data use %s", blob)
-	blob = object.WithMetrics(blob)
 	blob = object.NewLimited(blob, c.Int64("upload-limit")*1e6/8, c.Int64("download-limit")*1e6/8)
 	store := chunk.NewCachedStore(blob, chunkConf)
 	m.OnMsg(meta.DeleteChunk, meta.MsgCallback(func(args ...interface{}) error {
@@ -237,7 +236,7 @@ func mount(c *cli.Context) error {
 		go usage.ReportUsage(m, version.Version())
 	}
 	mount_main(conf, m, store, c)
-	return nil
+	return m.CloseSession()
 }
 
 func clientFlags() []cli.Flag {
