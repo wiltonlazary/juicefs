@@ -2394,7 +2394,6 @@ func (m *kvMeta) SetXattr(ctx Context, inode Ino, name string, value []byte, fla
 	key := m.xattrKey(inode, name)
 	err := m.txn(func(tx kvTxn) error {
 		switch flags {
-		case XattrCreateOrReplace:
 		case XattrCreate:
 			v := tx.get(key)
 			if v != nil {
@@ -2405,8 +2404,6 @@ func (m *kvMeta) SetXattr(ctx Context, inode Ino, name string, value []byte, fla
 			if v == nil {
 				return ENOATTR
 			}
-		default:
-			return syscall.EINVAL
 		}
 		tx.set(key, value)
 		return nil
@@ -2462,7 +2459,7 @@ func (m *kvMeta) dumpEntry(inode Ino) (*DumpedEntry, error) {
 				ss := readSliceBuf(v)
 				slices := make([]*DumpedSlice, 0, len(ss))
 				for _, s := range ss {
-					slices = append(slices, &DumpedSlice{s.pos, s.chunkid, s.size, s.off, s.len})
+					slices = append(slices, &DumpedSlice{Pos: s.pos, Chunkid: s.chunkid, Off: s.size, Len: s.off, Size: s.len})
 				}
 				e.Chunks = append(e.Chunks, &DumpedChunk{indx, slices})
 			}

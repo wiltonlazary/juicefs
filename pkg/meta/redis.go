@@ -2913,9 +2913,6 @@ func (r *redisMeta) SetXattr(ctx Context, inode Ino, name string, value []byte, 
 	key := r.xattrKey(inode)
 	return r.txn(ctx, func(tx *redis.Tx) error {
 		switch flags {
-		case XattrCreateOrReplace:
-			_, err := r.rdb.HSet(ctx, key, name, value).Result()
-			return err
 		case XattrCreate:
 			ok, err := tx.HSetNX(c, key, name, value).Result()
 			if err != nil {
@@ -2933,8 +2930,10 @@ func (r *redisMeta) SetXattr(ctx Context, inode Ino, name string, value []byte, 
 			}
 			_, err := r.rdb.HSet(ctx, key, name, value).Result()
 			return err
+		default: // XattrCreateOrReplace
+			_, err := r.rdb.HSet(ctx, key, name, value).Result()
+			return err
 		}
-		return syscall.EINVAL
 	}, key)
 }
 
@@ -3005,7 +3004,7 @@ func (m *redisMeta) dumpEntry(inode Ino) (*DumpedEntry, error) {
 				ss := readSlices(vals)
 				slices := make([]*DumpedSlice, 0, len(ss))
 				for _, s := range ss {
-					slices = append(slices, &DumpedSlice{s.pos, s.chunkid, s.size, s.off, s.len})
+					slices = append(slices, &DumpedSlice{Pos: s.pos, Size: s.len, Off: s.size, Len: s.off, Chunkid: s.chunkid})
 				}
 				e.Chunks = append(e.Chunks, &DumpedChunk{indx, slices})
 			}

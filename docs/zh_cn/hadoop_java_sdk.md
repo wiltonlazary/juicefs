@@ -24,6 +24,7 @@
   * [CDH6](#cdh6)
   * [HDP](#hdp)
   * [Flink](#flink)
+  * [Hudi](#hudi)
   * [重启服务](#%E9%87%8D%E5%90%AF%E6%9C%8D%E5%8A%A1)
 - [环境验证](#%E7%8E%AF%E5%A2%83%E9%AA%8C%E8%AF%81)
   * [Hadoop](#hadoop)
@@ -36,6 +37,7 @@
   * [2. 分布式测试](#2-%E5%88%86%E5%B8%83%E5%BC%8F%E6%B5%8B%E8%AF%95)
     + [元数据性能](#%E5%85%83%E6%95%B0%E6%8D%AE%E6%80%A7%E8%83%BD-1)
     + [I/O 性能](#io-%E6%80%A7%E8%83%BD-1)
+  * [3. TPC-DS](#3-tpc-ds)
 - [FAQ](#faq)
 
 ----
@@ -153,11 +155,11 @@ $ make win
 
 #### 核心配置
 
-| 配置项                           | 默认值                       | 描述                                                         |
-| -------------------------------- | ---------------------------- | ------------------------------------------------------------ |
-| `fs.jfs.impl`                    | `io.juicefs.JuiceFileSystem` | 指定要使用的存储实现，默认使用 `jfs://` 。如想要使用 `cfs://` 作为 scheme，则修改为 `fs.cfs.impl` 即可。在使用 `cfs://` 时，仍是访问 JuiceFS 中的数据。 |
-| `fs.AbstractFileSystem.jfs.impl` | `io.juicefs.JuiceFS`         |                                                              |
-| `juicefs.meta`                   |                              | 指定预先创建好的 JuiceFS 文件系统的元数据引擎地址。可以通过 `juicefs.{vol_name}.meta` 格式为客户端同时配置多个文件系统。 |
+| 配置项                           | 默认值                       | 描述                                                                                                                                                                                                 |
+| -------------------------------- | ---------------------------- | ------------------------------------------------------------                                                                                                                                         |
+| `fs.jfs.impl`                    | `io.juicefs.JuiceFileSystem` | 指定要使用的存储实现，默认使用 `jfs://` 作为 scheme。如想要使用其它 scheme（例如 `cfs://`），则修改为 `fs.cfs.impl` 即可。无论使用的 scheme 是什么，访问的都是 JuiceFS 中的数据。                    |
+| `fs.AbstractFileSystem.jfs.impl` | `io.juicefs.JuiceFS`         | 指定要使用的存储实现，默认使用 `jfs://` 作为 scheme。如想要使用其它 scheme（例如 `cfs://`），则修改为 `fs.AbstractFileSystem.cfs.impl` 即可。无论使用的 scheme 是什么，访问的都是 JuiceFS 中的数据。 |
+| `juicefs.meta`                   |                              | 指定预先创建好的 JuiceFS 文件系统的元数据引擎地址。可以通过 `juicefs.{vol_name}.meta` 格式为客户端同时配置多个文件系统。具体请参考[「多文件系统配置」](#多文件系统配置)。                            |
 
 #### 缓存配置
 
@@ -269,6 +271,12 @@ $HADOOP_COMMON_HOME/lib/juicefs-hadoop.jar
 ### Flink
 
 将配置参数加入 `conf/flink-conf.yaml`。如果只是在 Flink 中使用 JuiceFS, 可以不在 Hadoop 环境配置 JuiceFS，只需要配置 Flink 客户端即可。
+
+### Hudi
+
+> **注意**：目前最新版 Hudi（v0.9.0）还不支持 JuiceFS，你需要自行编译最新 master 分支。
+
+请参考[「Hudi 官方文档」](https://hudi.apache.org/docs/next/jfs_hoodie)了解如何配置 JuiceFS。
 
 ### 重启服务
 
@@ -491,6 +499,120 @@ JuiceFS Hadoop Java SDK 支持把运行指标以 [Prometheus](https://prometheus
 | ------ | ----             | ----           |
 | write  | 198              | 1835           |
 | read   | 124              | 1234           |
+
+### 3. TPC-DS
+
+测试数据集 100GB 规模，测试 Parquet 和 ORC 两种文件格式。
+
+本次测试仅测试前 10 个查询。
+
+使用 Spark Thrift JDBC/ODBC Server 开启 Spark 常驻进程，然后通过 Beeline 连接提交任务。
+
+#### 测试硬件
+
+|        | 机器型号             | CPU  | Memory | Disk                                            | 数量 |
+| ------ | -------------------  | ---- | ------ | ----------------------------------              | ---- |
+| Master | 阿里云 ecs.r6.xlarge | 4    | 32GiB  | 系统盘：100GiB                                  | 1    |
+| Core   | 阿里云 ecs.r6.xlarge | 4    | 32GiB  | 系统盘：100GiB<br />数据盘：500GiB 高效云盘 x 2 | 3    |
+
+#### 软件配置
+
+##### Spark Thrift JDBC/ODBC Server
+
+```shell
+${SPARK_HOME}/sbin/start-thriftserver.sh \
+  --master yarn \
+  --driver-memory 8g \
+  --executor-memory 10g \
+  --executor-cores 3 \
+  --num-executors 3 \
+  --conf spark.locality.wait=100 \
+  --conf spark.sql.crossJoin.enabled=true \
+  --hiveconf hive.server2.thrift.port=10001
+```
+
+##### JuiceFS 缓存配置
+
+Core 节点 2 块数据盘挂载在 `/data01` 和 `/data02` 目录下，`core-site.xml` 配置如下：
+
+```xml
+<property>
+  <name>juicefs.cache-size</name>
+  <value>200000</value>
+</property>
+<property>
+  <name>juicefs.cache-dir</name>
+  <value>/data*/jfscache</value>
+</property>
+<property>
+  <name>juicefs.cache-full-block</name>
+  <value>false</value>
+</property>
+<property>
+  <name>juicefs.discover-nodes-url</name>
+  <value>yarn</value>
+</property>
+<property>
+  <name>juicefs.attr-cache</name>
+  <value>3</value>
+</property>
+<property>
+  <name>juicefs.entry-cache</name>
+  <value>3</value>
+</property>
+<property>
+  <name>juicefs.dir-entry-cache</name>
+  <value>3</value>
+</property>
+```
+
+#### 测试
+
+任务提交的命令如下：
+
+```shell
+${SPARK_HOME}/bin/beeline -u jdbc:hive2://localhost:10001/${DATABASE} \
+  -n hadoop \
+  -f query{i}.sql
+```
+
+#### 结果
+
+JuiceFS 可以使用本地磁盘作为缓存加速，以下数据是跑 4 次后的结果（单位秒）。
+
+##### ORC
+
+| Queries | Redis | TiKV       | HDFS   |
+| ------- | ----- | ---------- | ------ |
+| q1      | 20    | 20         | 20     |
+| q2      | 28    | 33         | 26     |
+| q3      | 24    | 27         | 28     |
+| q4      | 300   | 309        | 290    |
+| q5      | 116   | 117        | 91     |
+| q6      | 37    | 42         | 41     |
+| q7      | 24    | 28         | 23     |
+| q8      | 13    | 15         | 16     |
+| q9      | 87    | 112        | 89     |
+| q10     | 23    | 24         | 22     |
+
+![orc](../images/spark_ql_orc.png)
+
+##### Parquet
+
+| Queries | Redis | TiKV       | HDFS   |
+| ------- | ----- | ---------- | ------ |
+| q1      | 33    | 35         | 39     |
+| q2      | 28    | 32         | 31     |
+| q3      | 23    | 25         | 24     |
+| q4      | 273   | 284        | 266    |
+| q5      | 96    | 107        | 94     |
+| q6      | 36    | 35         | 42     |
+| q7      | 28    | 30         | 24     |
+| q8      | 11    | 12         | 14     |
+| q9      | 85    | 97         | 77     |
+| q10     | 24    | 28         | 38     |
+
+![parquet](../images/spark_sql_parquet.png)
 
 
 ## FAQ
