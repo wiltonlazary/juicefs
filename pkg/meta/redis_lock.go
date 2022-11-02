@@ -1,39 +1,53 @@
+//go:build !noredis
+// +build !noredis
+
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/juicedata/juicefs/pkg/utils"
 )
 
 func (r *redisMeta) Flock(ctx Context, inode Ino, owner uint64, ltype uint32, block bool) syscall.Errno {
 	ikey := r.flockKey(inode)
 	lkey := r.ownerKey(owner)
 	if ltype == F_UNLCK {
-		_, err := r.rdb.HDel(ctx, ikey, lkey).Result()
-		return errno(err)
+		return errno(r.txn(ctx, func(tx *redis.Tx) error {
+			lkeys, err := tx.HKeys(ctx, ikey).Result()
+			if err != nil {
+				return err
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HDel(ctx, ikey, lkey)
+				if len(lkeys) == 1 && lkeys[0] == lkey {
+					pipe.SRem(ctx, r.lockedKey(r.sid), ikey)
+				}
+				return nil
+			})
+			return err
+		}, ikey))
 	}
-	var err syscall.Errno
+	var err error
 	for {
 		err = r.txn(ctx, func(tx *redis.Tx) error {
 			owners, err := tx.HGetAll(ctx, ikey).Result()
@@ -76,85 +90,7 @@ func (r *redisMeta) Flock(ctx Context, inode Ino, owner uint64, ltype uint32, bl
 			return syscall.EINTR
 		}
 	}
-	return err
-}
-
-type plockRecord struct {
-	ltype uint32
-	pid   uint32
-	start uint64
-	end   uint64
-}
-
-func loadLocks(d []byte) []plockRecord {
-	var ls []plockRecord
-	rb := utils.FromBuffer(d)
-	for rb.HasMore() {
-		ls = append(ls, plockRecord{rb.Get32(), rb.Get32(), rb.Get64(), rb.Get64()})
-	}
-	return ls
-}
-
-func dumpLocks(ls []plockRecord) []byte {
-	wb := utils.NewBuffer(uint32(len(ls)) * 24)
-	for _, l := range ls {
-		wb.Put32(l.ltype)
-		wb.Put32(l.pid)
-		wb.Put64(l.start)
-		wb.Put64(l.end)
-	}
-	return wb.Bytes()
-}
-
-func updateLocks(ls []plockRecord, nl plockRecord) []plockRecord {
-	// ls is ordered by l.start without overlap
-	size := len(ls)
-	for i := 0; i < size && nl.start <= nl.end; i++ {
-		l := ls[i]
-		if nl.start < l.start && nl.end >= l.start {
-			// split nl
-			ls = append(ls, nl)
-			ls[len(ls)-1].end = l.start - 1
-			nl.start = l.start
-		}
-		if nl.start > l.start && nl.start <= l.end {
-			// split l
-			l.end = nl.start - 1
-			ls = append(ls, l)
-			ls[i].start = nl.start
-			l = ls[i]
-		}
-		if nl.start == l.start {
-			ls[i].ltype = nl.ltype // update l
-			ls[i].pid = nl.pid
-			if l.end > nl.end {
-				// split l
-				ls[i].end = nl.end
-				l.start = nl.end + 1
-				ls = append(ls, l)
-			}
-			nl.start = ls[i].end + 1
-		}
-	}
-	if nl.start <= nl.end {
-		ls = append(ls, nl)
-	}
-	sort.Slice(ls, func(i, j int) bool { return ls[i].start < ls[j].start })
-	for i := 0; i < len(ls); {
-		if ls[i].ltype == F_UNLCK || ls[i].start > ls[i].end {
-			// remove empty one
-			copy(ls[i:], ls[i+1:])
-			ls = ls[:len(ls)-1]
-		} else {
-			if i+1 < len(ls) && ls[i].ltype == ls[i+1].ltype && ls[i].pid == ls[i+1].pid && ls[i].end+1 == ls[i+1].start {
-				// combine continuous range
-				ls[i].end = ls[i+1].end
-				ls[i+1].start = ls[i+1].end + 1
-			}
-			i++
-		}
-	}
-	return ls
+	return errno(err)
 }
 
 func (r *redisMeta) Getlk(ctx Context, inode Ino, owner uint64, ltype *uint32, start, end *uint64, pid *uint32) syscall.Errno {
@@ -174,13 +110,13 @@ func (r *redisMeta) Getlk(ctx Context, inode Ino, owner uint64, ltype *uint32, s
 		ls := loadLocks([]byte(d))
 		for _, l := range ls {
 			// find conflicted locks
-			if (*ltype == F_WRLCK || l.ltype == F_WRLCK) && *end >= l.start && *start <= l.end {
-				*ltype = l.ltype
-				*start = l.start
-				*end = l.end
+			if (*ltype == F_WRLCK || l.Type == F_WRLCK) && *end >= l.Start && *start <= l.End {
+				*ltype = l.Type
+				*start = l.Start
+				*end = l.End
 				sid, _ := strconv.Atoi(strings.Split(k, "_")[0])
-				if int64(sid) == r.sid {
-					*pid = l.pid
+				if uint64(sid) == r.sid {
+					*pid = l.Pid
 				} else {
 					*pid = 0
 				}
@@ -198,13 +134,13 @@ func (r *redisMeta) Getlk(ctx Context, inode Ino, owner uint64, ltype *uint32, s
 func (r *redisMeta) Setlk(ctx Context, inode Ino, owner uint64, block bool, ltype uint32, start, end uint64, pid uint32) syscall.Errno {
 	ikey := r.plockKey(inode)
 	lkey := r.ownerKey(owner)
-	var err syscall.Errno
+	var err error
 	lock := plockRecord{ltype, pid, start, end}
 	for {
 		err = r.txn(ctx, func(tx *redis.Tx) error {
 			if ltype == F_UNLCK {
 				d, err := tx.HGet(ctx, ikey, lkey).Result()
-				if err != nil {
+				if err != nil && err != redis.Nil {
 					return err
 				}
 				ls := loadLocks([]byte(d))
@@ -212,9 +148,19 @@ func (r *redisMeta) Setlk(ctx Context, inode Ino, owner uint64, block bool, ltyp
 					return nil
 				}
 				ls = updateLocks(ls, lock)
+				var lkeys []string
+				if len(ls) == 0 {
+					lkeys, err = tx.HKeys(ctx, ikey).Result()
+					if err != nil {
+						return err
+					}
+				}
 				_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 					if len(ls) == 0 {
 						pipe.HDel(ctx, ikey, lkey)
+						if len(lkeys) == 1 && lkeys[0] == lkey {
+							pipe.SRem(ctx, r.lockedKey(r.sid), ikey)
+						}
 					} else {
 						pipe.HSet(ctx, ikey, lkey, dumpLocks(ls))
 					}
@@ -232,7 +178,7 @@ func (r *redisMeta) Setlk(ctx Context, inode Ino, owner uint64, block bool, ltyp
 				ls := loadLocks([]byte(d))
 				for _, l := range ls {
 					// find conflicted locks
-					if (ltype == F_WRLCK || l.ltype == F_WRLCK) && end >= l.start && start <= l.end {
+					if (ltype == F_WRLCK || l.Type == F_WRLCK) && end >= l.Start && start <= l.End {
 						return syscall.EAGAIN
 					}
 				}
@@ -258,5 +204,5 @@ func (r *redisMeta) Setlk(ctx Context, inode Ino, owner uint64, block bool, ltyp
 			return syscall.EINTR
 		}
 	}
-	return err
+	return errno(err)
 }

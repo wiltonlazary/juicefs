@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package vfs
@@ -18,6 +19,7 @@ package vfs
 import (
 	"encoding/json"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,30 +35,32 @@ type Context = LogContext
 
 const (
 	rootID      = 1
-	maxName     = 255
+	maxName     = meta.MaxName
 	maxSymlink  = 4096
 	maxFileSize = meta.ChunkSize << 31
 )
+
+type Port struct {
+	PrometheusAgent string `json:",omitempty"`
+	DebugAgent      string `json:",omitempty"`
+	ConsulAddr      string `json:",omitempty"`
+	PyroscopeAddr   string `json:",omitempty"`
+}
 
 type Config struct {
 	Meta            *meta.Config
 	Format          *meta.Format
 	Chunk           *chunk.Config
+	Port            *Port
 	Version         string
-	Mountpoint      string
 	AttrTimeout     time.Duration
 	DirEntryTimeout time.Duration
 	EntryTimeout    time.Duration
+	BackupMeta      time.Duration
 	FastResolve     bool   `json:",omitempty"`
 	AccessLog       string `json:",omitempty"`
+	HideInternal    bool
 }
-
-var (
-	m      meta.Meta
-	store  chunk.ChunkStore
-	reader DataReader
-	writer DataWriter
-)
 
 var (
 	readSizeHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -69,36 +73,20 @@ var (
 		Help:    "size of write distributions.",
 		Buckets: prometheus.LinearBuckets(4096, 4096, 32),
 	})
-	usedBufferSize = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "used_buffer_size_bytes",
-		Help: "size of currently used buffer.",
-	}, func() float64 {
-		if dw, ok := writer.(*dataWriter); ok {
-			return float64(dw.usedBufferSize())
-		}
-		return 0.0
-	})
-	storeCacheSize = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "store_cache_size_bytes",
-		Help: "size of store cache.",
-	}, func() float64 {
-		if dw, ok := writer.(*dataWriter); ok {
-			return float64(dw.store.UsedMemory())
-		}
-		return 0.0
-	})
 )
 
-func Lookup(ctx Context, parent Ino, name string) (entry *meta.Entry, err syscall.Errno) {
-	nleng := len(name)
+func (v *VFS) Lookup(ctx Context, parent Ino, name string) (entry *meta.Entry, err syscall.Errno) {
 	var inode Ino
 	var attr = &Attr{}
-	if parent == rootID {
-		if nleng == 2 && name[0] == '.' && name[1] == '.' {
-			name = name[:1]
-		}
+	if parent == rootID || name == ".control" {
 		n := getInternalNodeByName(name)
 		if n != nil {
+			entry = &meta.Entry{Inode: n.inode, Attr: n.attr}
+			return
+		}
+	}
+	if IsSpecialNode(parent) && name == "." {
+		if n := getInternalNode(parent); n != nil {
 			entry = &meta.Entry{Inode: n.inode, Attr: n.attr}
 			return
 		}
@@ -106,20 +94,18 @@ func Lookup(ctx Context, parent Ino, name string) (entry *meta.Entry, err syscal
 	defer func() {
 		logit(ctx, "lookup (%d,%s): %s%s", parent, name, strerr(err), (*Entry)(entry))
 	}()
-	if nleng > maxName {
+	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
 		return
 	}
-	err = m.Lookup(ctx, parent, name, &inode, attr)
-	if err != 0 {
-		return
+	err = v.Meta.Lookup(ctx, parent, name, &inode, attr)
+	if err == 0 {
+		entry = &meta.Entry{Inode: inode, Attr: attr}
 	}
-	UpdateLength(inode, attr)
-	entry = &meta.Entry{Inode: inode, Attr: attr}
 	return
 }
 
-func GetAttr(ctx Context, ino Ino, opened uint8) (entry *meta.Entry, err syscall.Errno) {
+func (v *VFS) GetAttr(ctx Context, ino Ino, opened uint8) (entry *meta.Entry, err syscall.Errno) {
 	if IsSpecialNode(ino) && getInternalNode(ino) != nil {
 		n := getInternalNode(ino)
 		entry = &meta.Entry{Inode: n.inode, Attr: n.attr}
@@ -127,12 +113,10 @@ func GetAttr(ctx Context, ino Ino, opened uint8) (entry *meta.Entry, err syscall
 	}
 	defer func() { logit(ctx, "getattr (%d): %s%s", ino, strerr(err), (*Entry)(entry)) }()
 	var attr = &Attr{}
-	err = m.GetAttr(ctx, ino, attr)
-	if err != 0 {
-		return
+	err = v.Meta.GetAttr(ctx, ino, attr)
+	if err == 0 {
+		entry = &meta.Entry{Inode: ino, Attr: attr}
 	}
-	UpdateLength(ino, attr)
-	entry = &meta.Entry{Inode: ino, Attr: attr}
 	return
 }
 
@@ -156,16 +140,15 @@ func get_filetype(mode uint16) uint8 {
 	return meta.TypeFile
 }
 
-func Mknod(ctx Context, parent Ino, name string, mode uint16, cumask uint16, rdev uint32) (entry *meta.Entry, err syscall.Errno) {
-	nleng := uint8(len(name))
+func (v *VFS) Mknod(ctx Context, parent Ino, name string, mode uint16, cumask uint16, rdev uint32) (entry *meta.Entry, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "mknod (%d,%s,%s:0%04o,0x%08X): %s%s", parent, name, smode(mode), mode, rdev, strerr(err), (*Entry)(entry))
 	}()
 	if parent == rootID && IsSpecialName(name) {
-		err = syscall.EACCES
+		err = syscall.EEXIST
 		return
 	}
-	if nleng > maxName {
+	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
 		return
 	}
@@ -177,68 +160,60 @@ func Mknod(ctx Context, parent Ino, name string, mode uint16, cumask uint16, rde
 
 	var inode Ino
 	var attr = &Attr{}
-	err = m.Mknod(ctx, parent, name, _type, mode&07777, cumask, uint32(rdev), &inode, attr)
+	err = v.Meta.Mknod(ctx, parent, name, _type, mode&07777, cumask, rdev, "", &inode, attr)
 	if err == 0 {
 		entry = &meta.Entry{Inode: inode, Attr: attr}
 	}
 	return
 }
 
-func Unlink(ctx Context, parent Ino, name string) (err syscall.Errno) {
+func (v *VFS) Unlink(ctx Context, parent Ino, name string) (err syscall.Errno) {
 	defer func() { logit(ctx, "unlink (%d,%s): %s", parent, name, strerr(err)) }()
-	nleng := uint8(len(name))
 	if parent == rootID && IsSpecialName(name) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
-	if nleng > maxName {
+	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
 		return
 	}
-	err = m.Unlink(ctx, parent, name)
+	err = v.Meta.Unlink(ctx, parent, name)
 	return
 }
 
-func Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16) (entry *meta.Entry, err syscall.Errno) {
+func (v *VFS) Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16) (entry *meta.Entry, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "mkdir (%d,%s,%s:0%04o): %s%s", parent, name, smode(mode), mode, strerr(err), (*Entry)(entry))
 	}()
-	nleng := uint8(len(name))
 	if parent == rootID && IsSpecialName(name) {
 		err = syscall.EEXIST
 		return
 	}
-	if nleng > maxName {
+	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
 		return
 	}
 
 	var inode Ino
 	var attr = &Attr{}
-	err = m.Mkdir(ctx, parent, name, mode, cumask, 0, &inode, attr)
+	err = v.Meta.Mkdir(ctx, parent, name, mode, cumask, 0, &inode, attr)
 	if err == 0 {
 		entry = &meta.Entry{Inode: inode, Attr: attr}
 	}
 	return
 }
 
-func Rmdir(ctx Context, parent Ino, name string) (err syscall.Errno) {
-	nleng := uint8(len(name))
+func (v *VFS) Rmdir(ctx Context, parent Ino, name string) (err syscall.Errno) {
 	defer func() { logit(ctx, "rmdir (%d,%s): %s", parent, name, strerr(err)) }()
-	if parent == rootID && IsSpecialName(name) {
-		err = syscall.EACCES
-		return
-	}
-	if nleng > maxName {
+	if len(name) > maxName {
 		err = syscall.ENAMETOOLONG
 		return
 	}
-	err = m.Rmdir(ctx, parent, name)
+	err = v.Meta.Rmdir(ctx, parent, name)
 	return
 }
 
-func Symlink(ctx Context, path string, parent Ino, name string) (entry *meta.Entry, err syscall.Errno) {
-	nleng := uint8(len(name))
+func (v *VFS) Symlink(ctx Context, path string, parent Ino, name string) (entry *meta.Entry, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "symlink (%d,%s,%s): %s%s", parent, name, path, strerr(err), (*Entry)(entry))
 	}()
@@ -246,36 +221,36 @@ func Symlink(ctx Context, path string, parent Ino, name string) (entry *meta.Ent
 		err = syscall.EEXIST
 		return
 	}
-	if nleng > maxName || (len(path)+1) > maxSymlink {
+	if len(name) > maxName || len(path) >= maxSymlink {
 		err = syscall.ENAMETOOLONG
 		return
 	}
 
 	var inode Ino
 	var attr = &Attr{}
-	err = m.Symlink(ctx, parent, name, path, &inode, attr)
+	err = v.Meta.Symlink(ctx, parent, name, path, &inode, attr)
 	if err == 0 {
 		entry = &meta.Entry{Inode: inode, Attr: attr}
 	}
 	return
 }
 
-func Readlink(ctx Context, ino Ino) (path []byte, err syscall.Errno) {
+func (v *VFS) Readlink(ctx Context, ino Ino) (path []byte, err syscall.Errno) {
 	defer func() { logit(ctx, "readlink (%d): %s (%s)", ino, strerr(err), string(path)) }()
-	err = m.ReadLink(ctx, ino, &path)
+	err = v.Meta.ReadLink(ctx, ino, &path)
 	return
 }
 
-func Rename(ctx Context, parent Ino, name string, newparent Ino, newname string, flags uint32) (err syscall.Errno) {
+func (v *VFS) Rename(ctx Context, parent Ino, name string, newparent Ino, newname string, flags uint32) (err syscall.Errno) {
 	defer func() {
 		logit(ctx, "rename (%d,%s,%d,%s,%d): %s", parent, name, newparent, newname, flags, strerr(err))
 	}()
 	if parent == rootID && IsSpecialName(name) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
 	if newparent == rootID && IsSpecialName(newname) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
 	if len(name) > maxName || len(newname) > maxName {
@@ -283,20 +258,20 @@ func Rename(ctx Context, parent Ino, name string, newparent Ino, newname string,
 		return
 	}
 
-	err = m.Rename(ctx, parent, name, newparent, newname, flags, nil, nil)
+	err = v.Meta.Rename(ctx, parent, name, newparent, newname, flags, nil, nil)
 	return
 }
 
-func Link(ctx Context, ino Ino, newparent Ino, newname string) (entry *meta.Entry, err syscall.Errno) {
+func (v *VFS) Link(ctx Context, ino Ino, newparent Ino, newname string) (entry *meta.Entry, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "link (%d,%d,%s): %s%s", ino, newparent, newname, strerr(err), (*Entry)(entry))
 	}()
 	if IsSpecialNode(ino) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
 	if newparent == rootID && IsSpecialName(newname) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
 	if len(newname) > maxName {
@@ -305,37 +280,32 @@ func Link(ctx Context, ino Ino, newparent Ino, newname string) (entry *meta.Entr
 	}
 
 	var attr = &Attr{}
-	err = m.Link(ctx, ino, newparent, newname, attr)
+	err = v.Meta.Link(ctx, ino, newparent, newname, attr)
 	if err == 0 {
-		UpdateLength(ino, attr)
 		entry = &meta.Entry{Inode: ino, Attr: attr}
 	}
 	return
 }
 
-func Opendir(ctx Context, ino Ino) (fh uint64, err syscall.Errno) {
+func (v *VFS) Opendir(ctx Context, ino Ino) (fh uint64, err syscall.Errno) {
 	defer func() { logit(ctx, "opendir (%d): %s [fh:%d]", ino, strerr(err), fh) }()
-	if IsSpecialNode(ino) {
-		err = syscall.ENOTDIR
-		return
-	}
-	fh = newHandle(ino).fh
+	fh = v.newHandle(ino).fh
 	return
 }
 
-func UpdateLength(inode Ino, attr *meta.Attr) {
+func (v *VFS) UpdateLength(inode Ino, attr *meta.Attr) {
 	if attr.Full && attr.Typ == meta.TypeFile {
-		length := writer.GetLength(inode)
+		length := v.writer.GetLength(inode)
 		if length > attr.Length {
 			attr.Length = length
 		}
-		reader.Truncate(inode, attr.Length)
+		v.reader.Truncate(inode, attr.Length)
 	}
 }
 
-func Readdir(ctx Context, ino Ino, size uint32, off int, fh uint64, plus bool) (entries []*meta.Entry, err syscall.Errno) {
+func (v *VFS) Readdir(ctx Context, ino Ino, size uint32, off int, fh uint64, plus bool) (entries []*meta.Entry, readAt time.Time, err syscall.Errno) {
 	defer func() { logit(ctx, "readdir (%d,%d,%d): %s (%d)", ino, size, off, strerr(err), len(entries)) }()
-	h := findHandle(ino, fh)
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
@@ -345,17 +315,18 @@ func Readdir(ctx Context, ino Ino, size uint32, off int, fh uint64, plus bool) (
 
 	if h.children == nil || off == 0 {
 		var inodes []*meta.Entry
-		err = m.Readdir(ctx, ino, 1, &inodes)
+		h.readAt = time.Now()
+		err = v.Meta.Readdir(ctx, ino, 1, &inodes)
 		if err == syscall.EACCES {
-			err = m.Readdir(ctx, ino, 0, &inodes)
+			err = v.Meta.Readdir(ctx, ino, 0, &inodes)
 		}
 		if err != 0 {
 			return
 		}
 		h.children = inodes
-		if ino == rootID {
+		if ino == rootID && !v.Conf.HideInternal {
 			// add internal nodes
-			for _, node := range internalNodes {
+			for _, node := range internalNodes[1:] {
 				h.children = append(h.children, &meta.Entry{
 					Inode: node.inode,
 					Name:  []byte(node.name),
@@ -367,20 +338,21 @@ func Readdir(ctx Context, ino Ino, size uint32, off int, fh uint64, plus bool) (
 	if off < len(h.children) {
 		entries = h.children[off:]
 	}
+	readAt = h.readAt
 	return
 }
 
-func Releasedir(ctx Context, ino Ino, fh uint64) int {
-	h := findHandle(ino, fh)
+func (v *VFS) Releasedir(ctx Context, ino Ino, fh uint64) int {
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		return 0
 	}
-	ReleaseHandler(ino, fh)
+	v.ReleaseHandler(ino, fh)
 	logit(ctx, "releasedir (%d): OK", ino)
 	return 0
 }
 
-func Create(ctx Context, parent Ino, name string, mode uint16, cumask uint16, flags uint32) (entry *meta.Entry, fh uint64, err syscall.Errno) {
+func (v *VFS) Create(ctx Context, parent Ino, name string, mode uint16, cumask uint16, flags uint32) (entry *meta.Entry, fh uint64, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "create (%d,%s,%s:0%04o): %s%s [fh:%d]", parent, name, smode(mode), mode, strerr(err), (*Entry)(entry), fh)
 	}()
@@ -395,42 +367,19 @@ func Create(ctx Context, parent Ino, name string, mode uint16, cumask uint16, fl
 
 	var inode Ino
 	var attr = &Attr{}
-	err = m.Create(ctx, parent, name, mode&07777, cumask, flags, &inode, attr)
+	err = v.Meta.Create(ctx, parent, name, mode&07777, cumask, flags, &inode, attr)
 	if runtime.GOOS == "darwin" && err == syscall.ENOENT {
 		err = syscall.EACCES
 	}
-	if err != 0 {
-		return
+	if err == 0 {
+		v.UpdateLength(inode, attr)
+		fh = v.newFileHandle(inode, attr.Length, flags)
+		entry = &meta.Entry{Inode: inode, Attr: attr}
 	}
-
-	UpdateLength(inode, attr)
-	fh = newFileHandle(inode, attr.Length, flags)
-	entry = &meta.Entry{Inode: inode, Attr: attr}
 	return
 }
 
-func Open(ctx Context, ino Ino, flags uint32) (entry *meta.Entry, fh uint64, err syscall.Errno) {
-	var attr = &Attr{}
-	if IsSpecialNode(ino) {
-		if ino != controlInode && (flags&O_ACCMODE) != syscall.O_RDONLY {
-			err = syscall.EACCES
-			return
-		}
-		h := newHandle(ino)
-		fh = h.fh
-		switch ino {
-		case logInode:
-			openAccessLog(fh)
-		case statsInode:
-			h.data = collectMetrics()
-		case configInode:
-			config.Format.RemoveSecret()
-			h.data, _ = json.MarshalIndent(config, "", " ")
-		}
-		n := getInternalNode(ino)
-		entry = &meta.Entry{Inode: ino, Attr: n.attr}
-		return
-	}
+func (v *VFS) Open(ctx Context, ino Ino, flags uint32) (entry *meta.Entry, fh uint64, err syscall.Errno) {
 	defer func() {
 		if entry != nil {
 			logit(ctx, "open (%d): %s [fh:%d]", ino, strerr(err), fh)
@@ -438,18 +387,42 @@ func Open(ctx Context, ino Ino, flags uint32) (entry *meta.Entry, fh uint64, err
 			logit(ctx, "open (%d): %s", ino, strerr(err))
 		}
 	}()
-	err = m.Open(ctx, ino, flags, attr)
-	if err != 0 {
+	var attr = &Attr{}
+	if IsSpecialNode(ino) {
+		if ino != controlInode && (flags&O_ACCMODE) != syscall.O_RDONLY {
+			err = syscall.EACCES
+			return
+		}
+		h := v.newHandle(ino)
+		fh = h.fh
+		n := getInternalNode(ino)
+		if n == nil {
+			return
+		}
+		entry = &meta.Entry{Inode: ino, Attr: n.attr}
+		switch ino {
+		case logInode:
+			openAccessLog(fh)
+		case statsInode:
+			h.data = collectMetrics(v.registry)
+		case configInode:
+			v.Conf.Format.RemoveSecret()
+			h.data, _ = json.MarshalIndent(v.Conf, "", " ")
+			entry.Attr.Length = uint64(len(h.data))
+		}
 		return
 	}
 
-	UpdateLength(ino, attr)
-	fh = newFileHandle(ino, attr.Length, flags)
-	entry = &meta.Entry{Inode: ino, Attr: attr}
+	err = v.Meta.Open(ctx, ino, flags, attr)
+	if err == 0 {
+		v.UpdateLength(ino, attr)
+		fh = v.newFileHandle(ino, attr.Length, flags)
+		entry = &meta.Entry{Inode: ino, Attr: attr}
+	}
 	return
 }
 
-func Truncate(ctx Context, ino Ino, size int64, opened uint8, attr *Attr) (err syscall.Errno) {
+func (v *VFS) Truncate(ctx Context, ino Ino, size int64, opened uint8, attr *Attr) (err syscall.Errno) {
 	// defer func() { logit(ctx, "truncate (%d,%d): %s", ino, size, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -463,42 +436,42 @@ func Truncate(ctx Context, ino Ino, size int64, opened uint8, attr *Attr) (err s
 		err = syscall.EFBIG
 		return
 	}
-	hs := findAllHandles(ino)
+	hs := v.findAllHandles(ino)
 	for _, h := range hs {
 		if !h.Wlock(ctx) {
 			err = syscall.EINTR
 			return
 		}
-		defer h.Wunlock()
+		defer func(h *handle) { h.Wunlock() }(h)
 	}
-	writer.Flush(ctx, ino)
-	err = m.Truncate(ctx, ino, 0, uint64(size), attr)
-	if err != 0 {
-		return
+	_ = v.writer.Flush(ctx, ino)
+	err = v.Meta.Truncate(ctx, ino, 0, uint64(size), attr)
+	if err == 0 {
+		v.writer.Truncate(ino, uint64(size))
+		v.reader.Truncate(ino, uint64(size))
+		v.invalidateLength(ino)
 	}
-	writer.Truncate(ino, uint64(size))
-	reader.Truncate(ino, uint64(size))
 	return 0
 }
 
-func ReleaseHandler(ino Ino, fh uint64) {
-	releaseFileHandle(ino, fh)
+func (v *VFS) ReleaseHandler(ino Ino, fh uint64) {
+	v.releaseFileHandle(ino, fh)
 }
 
-func Release(ctx Context, ino Ino, fh uint64) (err syscall.Errno) {
+func (v *VFS) Release(ctx Context, ino Ino, fh uint64) {
+	var err syscall.Errno
+	defer func() { logit(ctx, "release (%d,%d): %s", ino, fh, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		if ino == logInode {
 			closeAccessLog(fh)
 		}
-		releaseHandle(ino, fh)
+		v.releaseHandle(ino, fh)
 		return
 	}
-	defer func() { logit(ctx, "release (%d): %s", ino, strerr(err)) }()
 	if fh > 0 {
-		f := findHandle(ino, fh)
+		f := v.findHandle(ino, fh)
 		if f != nil {
 			f.Lock()
-			// rwlock_wait_for_unlock:
 			for (f.writing | f.writers | f.readers) != 0 {
 				if f.cond.WaitWithTimeout(time.Second) && ctx.Canceled() {
 					f.Unlock()
@@ -511,31 +484,34 @@ func Release(ctx Context, ino Ino, fh uint64) (err syscall.Errno) {
 			owner := f.flockOwner
 			f.Unlock()
 			if f.writer != nil {
-				f.writer.Flush(ctx)
+				_ = f.writer.Flush(ctx)
+				v.invalidateLength(ino)
 			}
 			if locks&1 != 0 {
-				_ = m.Flock(ctx, ino, owner, F_UNLCK, false)
+				_ = v.Meta.Flock(ctx, ino, owner, F_UNLCK, false)
 			}
 		}
-		_ = m.Close(ctx, ino)
-		go releaseFileHandle(ino, fh) // after writes it waits for data sync, so do it after everything
+		_ = v.Meta.Close(ctx, ino)
+		go v.releaseFileHandle(ino, fh) // after writes it waits for data sync, so do it after everything
 	}
-	return
 }
 
-func Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err syscall.Errno) {
+func (v *VFS) Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err syscall.Errno) {
 	size := uint32(len(buf))
 	if IsSpecialNode(ino) {
 		if ino == logInode {
 			n = readAccessLog(fh, buf)
 		} else {
-			h := findHandle(ino, fh)
+			if ino == controlInode && runtime.GOOS == "darwin" {
+				fh = v.getControlHandle(ctx.Pid())
+			}
+			h := v.findHandle(ino, fh)
 			if h == nil {
 				err = syscall.EBADF
 				return
 			}
 			data := h.data
-			if off < uint64(h.off) {
+			if off < h.off {
 				data = nil
 			} else {
 				off -= h.off
@@ -552,6 +528,7 @@ func Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err s
 				h.off += 1 << 20
 				h.data = h.data[1<<20:]
 			}
+			logit(ctx, "read (%d,%d,%d,%d): %s (%d)", ino, size, off, fh, strerr(err), n)
 		}
 		return
 	}
@@ -560,7 +537,7 @@ func Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err s
 		readSizeHistogram.Observe(float64(n))
 		logit(ctx, "read (%d,%d,%d): %s (%d)", ino, size, off, strerr(err), n)
 	}()
-	h := findHandle(ino, fh)
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
@@ -579,7 +556,7 @@ func Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err s
 	}
 	defer h.Runlock()
 
-	writer.Flush(ctx, ino)
+	_ = v.writer.Flush(ctx, ino)
 	n, err = h.reader.Read(ctx, off, buf)
 	for err == syscall.EAGAIN {
 		n, err = h.reader.Read(ctx, off, buf)
@@ -591,10 +568,13 @@ func Read(ctx Context, ino Ino, buf []byte, off uint64, fh uint64) (n int, err s
 	return
 }
 
-func Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno) {
+func (v *VFS) Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno) {
 	size := uint64(len(buf))
-	defer func() { logit(ctx, "write (%d,%d,%d): %s", ino, size, off, strerr(err)) }()
-	h := findHandle(ino, fh)
+	if ino == controlInode && runtime.GOOS == "darwin" {
+		fh = v.getControlHandle(ctx.Pid())
+	}
+	defer func() { logit(ctx, "write (%d,%d,%d,%d): %s", ino, size, off, fh, strerr(err)) }()
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
@@ -609,14 +589,15 @@ func Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno)
 		rb := utils.ReadBuffer(h.pending)
 		cmd := rb.Get32()
 		size := int(rb.Get32())
-		if rb.Left() < int(size) {
+		if rb.Left() < size {
 			logger.Debugf("message not complete: %d %d > %d", cmd, size, rb.Left())
 			return
 		}
 		h.data = append(h.data, h.pending...)
 		h.pending = h.pending[:0]
-		if rb.Left() == int(size) {
-			h.data = append(h.data, handleInternalMsg(ctx, cmd, rb)...)
+		if rb.Left() == size {
+			h.bctx = meta.NewContext(ctx.Pid(), ctx.Uid(), ctx.Gids())
+			go v.handleInternalMsg(h.bctx, cmd, rb, &h.data)
 		} else {
 			logger.Warnf("broken message: %d %d < %d", cmd, size, rb.Left())
 			h.data = append(h.data, uint8(syscall.EIO&0xff))
@@ -641,25 +622,24 @@ func Write(ctx Context, ino Ino, buf []byte, off, fh uint64) (err syscall.Errno)
 	}
 	h.removeOp(ctx)
 
-	if err != 0 {
-		return
+	if err == 0 {
+		writtenSizeHistogram.Observe(float64(len(buf)))
+		v.reader.Truncate(ino, v.writer.GetLength(ino))
 	}
-	writtenSizeHistogram.Observe(float64(len(buf)))
-	reader.Truncate(ino, writer.GetLength(ino))
 	return
 }
 
-func Fallocate(ctx Context, ino Ino, mode uint8, off, length int64, fh uint64) (err syscall.Errno) {
+func (v *VFS) Fallocate(ctx Context, ino Ino, mode uint8, off, length int64, fh uint64) (err syscall.Errno) {
 	defer func() { logit(ctx, "fallocate (%d,%d,%d,%d): %s", ino, mode, off, length, strerr(err)) }()
 	if off < 0 || length <= 0 {
 		err = syscall.EINVAL
 		return
 	}
 	if IsSpecialNode(ino) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
-	h := findHandle(ino, fh)
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
@@ -679,11 +659,11 @@ func Fallocate(ctx Context, ino Ino, mode uint8, off, length int64, fh uint64) (
 	defer h.Wunlock()
 	defer h.removeOp(ctx)
 
-	err = m.Fallocate(ctx, ino, mode, uint64(off), uint64(length))
+	err = v.Meta.Fallocate(ctx, ino, mode, uint64(off), uint64(length))
 	return
 }
 
-func CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhOut, offOut, size uint64, flags uint32) (copied uint64, err syscall.Errno) {
+func (v *VFS) CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhOut, offOut, size uint64, flags uint32) (copied uint64, err syscall.Errno) {
 	defer func() {
 		logit(ctx, "copy_file_range (%d,%d,%d,%d,%d,%d): %s", nodeIn, offIn, nodeOut, offOut, size, flags, strerr(err))
 	}()
@@ -692,15 +672,15 @@ func CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhO
 		return
 	}
 	if IsSpecialNode(nodeOut) {
-		err = syscall.EACCES
+		err = syscall.EPERM
 		return
 	}
-	hi := findHandle(nodeIn, fhIn)
+	hi := v.findHandle(nodeIn, fhIn)
 	if fhIn == 0 || hi == nil || hi.inode != nodeIn {
 		err = syscall.EBADF
 		return
 	}
-	ho := findHandle(nodeOut, fhOut)
+	ho := v.findHandle(nodeOut, fhOut)
 	if fhOut == 0 || ho == nil || ho.inode != nodeOut {
 		err = syscall.EBADF
 		return
@@ -710,7 +690,7 @@ func CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhO
 		return
 	}
 	if ho.writer == nil {
-		err = syscall.EBADF
+		err = syscall.EACCES
 		return
 	}
 	if offIn >= maxFileSize || offIn+size >= maxFileSize || offOut >= maxFileSize || offOut+size >= maxFileSize {
@@ -721,67 +701,59 @@ func CopyFileRange(ctx Context, nodeIn Ino, fhIn, offIn uint64, nodeOut Ino, fhO
 		err = syscall.EINVAL
 		return
 	}
-	if nodeIn == nodeOut && (offIn+size > offOut || offOut+size > offIn) {
+	if nodeIn == nodeOut && (offIn <= offOut && offOut < offIn+size || offOut <= offIn && offIn < offOut+size) {
 		err = syscall.EINVAL // overlap
 		return
 	}
 
-	if !hi.Rlock(ctx) {
-		err = syscall.EINTR
-		return
-	}
-	defer hi.Runlock()
-	defer hi.removeOp(ctx)
 	if !ho.Wlock(ctx) {
 		err = syscall.EINTR
 		return
 	}
 	defer ho.Wunlock()
 	defer ho.removeOp(ctx)
+	if nodeIn != nodeOut {
+		if !hi.Rlock(ctx) {
+			err = syscall.EINTR
+			return
+		}
+		defer hi.Runlock()
+		defer hi.removeOp(ctx)
+	}
 
-	err = writer.Flush(ctx, nodeOut)
+	err = v.writer.Flush(ctx, nodeOut)
 	if err != 0 {
 		return
 	}
-	err = m.CopyFileRange(ctx, nodeIn, offIn, nodeOut, offOut, size, flags, &copied)
+	err = v.Meta.CopyFileRange(ctx, nodeIn, offIn, nodeOut, offOut, size, flags, &copied)
 	if err == 0 {
-		reader.Invalidate(nodeOut, offOut, uint64(size))
+		v.reader.Invalidate(nodeOut, offOut, size)
+		v.invalidateLength(nodeOut)
 	}
 	return
 }
 
-func doFsync(ctx Context, h *handle) (err syscall.Errno) {
-	if h.writer != nil {
-		if !h.Wlock(ctx) {
-			return syscall.EINTR
-		}
-		defer h.Wunlock()
-		defer h.removeOp(ctx)
-
-		err = h.writer.Flush(ctx)
-		if err == syscall.ENOENT || err == syscall.EPERM || err == syscall.EINVAL {
-			err = syscall.EBADF
-		}
+func (v *VFS) Flush(ctx Context, ino Ino, fh uint64, lockOwner uint64) (err syscall.Errno) {
+	if ino == controlInode && runtime.GOOS == "darwin" {
+		fh = v.getControlHandle(ctx.Pid())
+		defer v.releaseControlHandle(ctx.Pid())
 	}
-	return err
-}
-
-func Flush(ctx Context, ino Ino, fh uint64, lockOwner uint64) (err syscall.Errno) {
-	if IsSpecialNode(ino) {
-		return
-	}
-	defer func() { logit(ctx, "flush (%d): %s", ino, strerr(err)) }()
-	h := findHandle(ino, fh)
+	defer func() { logit(ctx, "flush (%d,%d,%016X): %s", ino, fh, lockOwner, strerr(err)) }()
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
 	}
+	if IsSpecialNode(ino) {
+		if ino == controlInode && h.bctx != nil {
+			h.bctx.Cancel()
+		}
+		return
+	}
 
 	if h.writer != nil {
-		if !h.Wlock(ctx) {
+		for !h.Wlock(ctx) {
 			h.cancelOp(ctx.Pid())
-			err = syscall.EINTR
-			return
 		}
 
 		err = h.writer.Flush(ctx)
@@ -798,22 +770,33 @@ func Flush(ctx Context, ino Ino, fh uint64, lockOwner uint64) (err syscall.Errno
 	locks := h.locks
 	h.Unlock()
 	if locks&2 != 0 {
-		_ = m.Setlk(ctx, ino, lockOwner, false, F_UNLCK, 0, 0x7FFFFFFFFFFFFFFF, 0)
+		_ = v.Meta.Setlk(ctx, ino, lockOwner, false, F_UNLCK, 0, 0x7FFFFFFFFFFFFFFF, 0)
 	}
 	return
 }
 
-func Fsync(ctx Context, ino Ino, datasync int, fh uint64) (err syscall.Errno) {
+func (v *VFS) Fsync(ctx Context, ino Ino, datasync int, fh uint64) (err syscall.Errno) {
 	defer func() { logit(ctx, "fsync (%d,%d): %s", ino, datasync, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		return
 	}
-	h := findHandle(ino, fh)
+	h := v.findHandle(ino, fh)
 	if h == nil {
 		err = syscall.EBADF
 		return
 	}
-	err = doFsync(ctx, h)
+	if h.writer != nil {
+		if !h.Wlock(ctx) {
+			return syscall.EINTR
+		}
+		defer h.Wunlock()
+		defer h.removeOp(ctx)
+
+		err = h.writer.Flush(ctx)
+		if err == syscall.ENOENT || err == syscall.EPERM || err == syscall.EINVAL {
+			err = syscall.EBADF
+		}
+	}
 	return
 }
 
@@ -822,7 +805,7 @@ const (
 	xattrMaxSize = 65536
 )
 
-func SetXattr(ctx Context, ino Ino, name string, value []byte, flags uint32) (err syscall.Errno) {
+func (v *VFS) SetXattr(ctx Context, ino Ino, name string, value []byte, flags uint32) (err syscall.Errno) {
 	defer func() { logit(ctx, "setxattr (%d,%s,%d,%d): %s", ino, name, len(value), flags, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -852,11 +835,11 @@ func SetXattr(ctx Context, ino Ino, name string, value []byte, flags uint32) (er
 		err = syscall.ENOTSUP
 		return
 	}
-	err = m.SetXattr(ctx, ino, name, value, flags)
+	err = v.Meta.SetXattr(ctx, ino, name, value, flags)
 	return
 }
 
-func GetXattr(ctx Context, ino Ino, name string, size uint32) (value []byte, err syscall.Errno) {
+func (v *VFS) GetXattr(ctx Context, ino Ino, name string, size uint32) (value []byte, err syscall.Errno) {
 	defer func() { logit(ctx, "getxattr (%d,%s,%d): %s (%d)", ino, name, size, strerr(err), len(value)) }()
 
 	if IsSpecialNode(ino) {
@@ -879,27 +862,27 @@ func GetXattr(ctx Context, ino Ino, name string, size uint32) (value []byte, err
 		err = syscall.ENOTSUP
 		return
 	}
-	err = m.GetXattr(ctx, ino, name, &value)
+	err = v.Meta.GetXattr(ctx, ino, name, &value)
 	if size > 0 && len(value) > int(size) {
 		err = syscall.ERANGE
 	}
 	return
 }
 
-func ListXattr(ctx Context, ino Ino, size int) (data []byte, err syscall.Errno) {
+func (v *VFS) ListXattr(ctx Context, ino Ino, size int) (data []byte, err syscall.Errno) {
 	defer func() { logit(ctx, "listxattr (%d,%d): %s (%d)", ino, size, strerr(err), len(data)) }()
 	if IsSpecialNode(ino) {
-		err = syscall.EPERM
+		err = meta.ENOATTR
 		return
 	}
-	err = m.ListXattr(ctx, ino, &data)
+	err = v.Meta.ListXattr(ctx, ino, &data)
 	if size > 0 && len(data) > size {
 		err = syscall.ERANGE
 	}
 	return
 }
 
-func RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
+func (v *VFS) RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
 	defer func() { logit(ctx, "removexattr (%d,%s): %s", ino, name, strerr(err)) }()
 	if IsSpecialNode(ino) {
 		err = syscall.EPERM
@@ -920,29 +903,136 @@ func RemoveXattr(ctx Context, ino Ino, name string) (err syscall.Errno) {
 		err = syscall.EINVAL
 		return
 	}
-	err = m.RemoveXattr(ctx, ino, name)
+	err = v.Meta.RemoveXattr(ctx, ino, name)
 	return
 }
 
 var logger = utils.GetLogger("juicefs")
 
-var config *Config
+type VFS struct {
+	Conf            *Config
+	Meta            meta.Meta
+	Store           chunk.ChunkStore
+	InvalidateEntry func(parent meta.Ino, name string) syscall.Errno
+	reader          DataReader
+	writer          DataWriter
 
-func Init(conf *Config, m_ meta.Meta, store_ chunk.ChunkStore) {
-	config = conf
-	m = m_
-	store = store_
-	reader = NewDataReader(conf, m, store)
-	writer = NewDataWriter(conf, m, store, reader)
-	handles = make(map[Ino][]*handle)
+	handles map[Ino][]*handle
+	hanleM  sync.Mutex
+	nextfh  uint64
+
+	modM       sync.Mutex
+	modifiedAt map[Ino]time.Time
+
+	handlersGause  prometheus.GaugeFunc
+	usedBufferSize prometheus.GaugeFunc
+	storeCacheSize prometheus.GaugeFunc
+	registry       *prometheus.Registry
 }
 
-func InitMetrics() {
-	prometheus.MustRegister(readSizeHistogram)
-	prometheus.MustRegister(writtenSizeHistogram)
-	prometheus.MustRegister(usedBufferSize)
-	prometheus.MustRegister(storeCacheSize)
-	prometheus.MustRegister(handlersGause)
-	prometheus.MustRegister(opsDurationsHistogram)
-	prometheus.MustRegister(compactSizeHistogram)
+func NewVFS(conf *Config, m meta.Meta, store chunk.ChunkStore, registerer prometheus.Registerer, registry *prometheus.Registry) *VFS {
+	reader := NewDataReader(conf, m, store)
+	writer := NewDataWriter(conf, m, store, reader)
+
+	v := &VFS{
+		Conf:       conf,
+		Meta:       m,
+		Store:      store,
+		reader:     reader,
+		writer:     writer,
+		handles:    make(map[Ino][]*handle),
+		modifiedAt: make(map[meta.Ino]time.Time),
+		nextfh:     1,
+		registry:   registry,
+	}
+
+	n := getInternalNode(configInode)
+	v.Conf.Format.RemoveSecret()
+	data, _ := json.MarshalIndent(v.Conf, "", " ")
+	n.attr.Length = uint64(len(data))
+	if conf.Meta.Subdir != "" { // don't show trash directory
+		internalNodes = internalNodes[:len(internalNodes)-1]
+	}
+
+	go v.cleanupModified()
+	initVFSMetrics(v, writer, registerer)
+	return v
+}
+
+func (v *VFS) invalidateLength(ino Ino) {
+	v.modM.Lock()
+	v.modifiedAt[ino] = time.Now()
+	v.modM.Unlock()
+}
+
+func (v *VFS) ModifiedSince(ino Ino, start time.Time) bool {
+	v.modM.Lock()
+	t, ok := v.modifiedAt[ino]
+	v.modM.Unlock()
+	return ok && t.After(start)
+}
+
+func (v *VFS) cleanupModified() {
+	for {
+		v.modM.Lock()
+		expire := time.Now().Add(time.Second * -30)
+		var cnt, deleted int
+		for i, t := range v.modifiedAt {
+			if t.Before(expire) {
+				delete(v.modifiedAt, i)
+				deleted++
+			}
+			cnt++
+			if cnt > 1000 {
+				break
+			}
+		}
+		v.modM.Unlock()
+		time.Sleep(time.Millisecond * time.Duration(1000*(cnt+1-deleted*2)/(cnt+1)))
+	}
+}
+
+func initVFSMetrics(v *VFS, writer DataWriter, registerer prometheus.Registerer) {
+	if registerer == nil {
+		return
+	}
+	v.handlersGause = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fuse_open_handlers",
+		Help: "number of open files and directories.",
+	}, func() float64 {
+		v.hanleM.Lock()
+		defer v.hanleM.Unlock()
+		return float64(len(v.handles))
+	})
+	v.usedBufferSize = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "used_buffer_size_bytes",
+		Help: "size of currently used buffer.",
+	}, func() float64 {
+		if dw, ok := writer.(*dataWriter); ok {
+			return float64(dw.usedBufferSize())
+		}
+		return 0.0
+	})
+	v.storeCacheSize = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "store_cache_size_bytes",
+		Help: "size of store cache.",
+	}, func() float64 {
+		if dw, ok := writer.(*dataWriter); ok {
+			return float64(dw.store.UsedMemory())
+		}
+		return 0.0
+	})
+	_ = registerer.Register(v.handlersGause)
+	_ = registerer.Register(v.usedBufferSize)
+	_ = registerer.Register(v.storeCacheSize)
+}
+
+func InitMetrics(registerer prometheus.Registerer) {
+	if registerer == nil {
+		return
+	}
+	registerer.MustRegister(readSizeHistogram)
+	registerer.MustRegister(writtenSizeHistogram)
+	registerer.MustRegister(opsDurationsHistogram)
+	registerer.MustRegister(compactSizeHistogram)
 }

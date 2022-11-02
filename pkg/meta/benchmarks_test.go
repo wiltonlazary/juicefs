@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
@@ -21,17 +22,16 @@ import (
 	"testing"
 
 	"github.com/juicedata/juicefs/pkg/utils"
-
 	"github.com/sirupsen/logrus"
 )
 
 const (
-	redisAddr = "redis://127.0.0.1/10"
-	// redisAddr = "redis://127.0.0.1:7369" // Titan
-	sqlAddr = "sqlite3://juicefs.db"
+	redisAddr = "redis://127.0.0.1/1"
+	sqlAddr   = "sqlite3://juicefs.db"
 	// sqlAddr = "mysql://root:@/juicefs" // MySQL
 	// sqlAddr = "mysql://root:@tcp(127.0.0.1:4000)/juicefs" // TiDB
-	tkvAddr = "tikv://127.0.0.1:2379/juicefs"
+	tkvAddr = "badger://test_db"
+	// tkvAddr = "tikv://127.0.0.1:2379/juicefs"
 )
 
 func init() {
@@ -116,7 +116,7 @@ func BenchmarkReadSliceBuf(b *testing.B) {
 
 func prepareParent(m Meta, name string, inode *Ino) error {
 	ctx := Background
-	if err := Remove(m, ctx, 1, name); err != 0 && err != syscall.ENOENT {
+	if err := m.Remove(ctx, 1, name, nil); err != 0 && err != syscall.ENOENT {
 		return fmt.Errorf("remove: %s", err)
 	}
 	if err := m.Mkdir(ctx, 1, name, 0755, 0, 0, inode, nil); err != 0 {
@@ -213,6 +213,7 @@ func benchReaddir(b *testing.B, m Meta, n int) {
 	var entries []*Entry
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		entries = entries[:0]
 		if err := m.Readdir(ctx, parent, 1, &entries); err != 0 {
 			b.Fatalf("readdir: %s", err)
 		}
@@ -230,7 +231,7 @@ func benchMknod(b *testing.B, m Meta) {
 	ctx := Background
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := m.Mknod(ctx, parent, fmt.Sprintf("f%d", i), TypeFile, 0644, 022, 0, nil, nil); err != 0 {
+		if err := m.Mknod(ctx, parent, fmt.Sprintf("f%d", i), TypeFile, 0644, 022, 0, "", nil, nil); err != 0 {
 			b.Fatalf("mknod: %s", err)
 		}
 	}
@@ -507,9 +508,9 @@ func benchReadlink(b *testing.B, m Meta) {
 
 func benchNewChunk(b *testing.B, m Meta) {
 	ctx := Background
-	var chunkid uint64
+	var sliceId uint64
 	for i := 0; i < b.N; i++ {
-		if err := m.NewChunk(ctx, 1, 0, 0, &chunkid); err != 0 {
+		if err := m.NewSlice(ctx, &sliceId); err != 0 {
 			b.Fatalf("newchunk: %s", err)
 		}
 	}
@@ -526,16 +527,16 @@ func benchWrite(b *testing.B, m Meta) {
 		b.Fatalf("create: %s", err)
 	}
 	var (
-		chunkid uint64
+		sliceId uint64
 		offset  uint32
 		step    uint32 = 1024
 	)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := m.NewChunk(ctx, inode, 0, 0, &chunkid); err != 0 {
+		if err := m.NewSlice(ctx, &sliceId); err != 0 {
 			b.Fatalf("newchunk: %s", err)
 		}
-		if err := m.Write(ctx, inode, 0, offset, Slice{Chunkid: chunkid, Size: step, Len: step}); err != 0 {
+		if err := m.Write(ctx, inode, 0, offset, Slice{Id: sliceId, Size: step, Len: step}); err != 0 {
 			b.Fatalf("write: %s", err)
 		}
 		offset += step
@@ -555,13 +556,13 @@ func benchRead(b *testing.B, m Meta, n int) {
 	if err := m.Create(ctx, parent, "file", 0644, 022, 0, &inode, nil); err != 0 {
 		b.Fatalf("create: %s", err)
 	}
-	var chunkid uint64
+	var sliceId uint64
 	var step uint32 = 1024
 	for j := 0; j < n; j++ {
-		if err := m.NewChunk(ctx, inode, 0, 0, &chunkid); err != 0 {
+		if err := m.NewSlice(ctx, &sliceId); err != 0 {
 			b.Fatalf("newchunk: %s", err)
 		}
-		if err := m.Write(ctx, inode, 0, uint32(j)*step, Slice{Chunkid: chunkid, Size: step, Len: step}); err != 0 {
+		if err := m.Write(ctx, inode, 0, uint32(j)*step, Slice{Id: sliceId, Size: step, Len: step}); err != 0 {
 			b.Fatalf("write: %s", err)
 		}
 	}
@@ -575,8 +576,6 @@ func benchRead(b *testing.B, m Meta, n int) {
 }
 
 func benchmarkDir(b *testing.B, m Meta) { // mkdir, rename dir, rmdir, readdir
-	_ = m.Init(Format{Name: "benchmarkDir"}, true)
-	_ = m.NewSession()
 	b.Run("mkdir", func(b *testing.B) { benchMkdir(b, m) })
 	b.Run("mvdir", func(b *testing.B) { benchMvdir(b, m) })
 	b.Run("rmdir", func(b *testing.B) { benchRmdir(b, m) })
@@ -586,23 +585,7 @@ func benchmarkDir(b *testing.B, m Meta) { // mkdir, rename dir, rmdir, readdir
 	// b.Run("readdir_100k", func(b *testing.B) { benchReaddir(b, m, 100000) })
 }
 
-func BenchmarkRedisDir(b *testing.B) {
-	m := NewClient(redisAddr, &Config{})
-	benchmarkDir(b, m)
-}
-func BenchmarkSQLDir(b *testing.B) {
-	m := NewClient(sqlAddr, &Config{})
-	benchmarkDir(b, m)
-}
-
-func BenchmarkTKVDir(b *testing.B) {
-	m := NewClient(tkvAddr, &Config{})
-	benchmarkDir(b, m)
-}
-
 func benchmarkFile(b *testing.B, m Meta) {
-	_ = m.Init(Format{Name: "benchmarkFile"}, true)
-	_ = m.NewSession()
 	b.Run("mknod", func(b *testing.B) { benchMknod(b, m) })
 	b.Run("create", func(b *testing.B) { benchCreate(b, m) })
 	b.Run("rename", func(b *testing.B) { benchRename(b, m) })
@@ -613,24 +596,7 @@ func benchmarkFile(b *testing.B, m Meta) {
 	b.Run("access", func(b *testing.B) { benchAccess(b, m) })
 }
 
-func BenchmarkRedisFile(b *testing.B) {
-	m := NewClient(redisAddr, &Config{})
-	benchmarkFile(b, m)
-}
-
-func BenchmarkSQLFile(b *testing.B) {
-	m := NewClient(sqlAddr, &Config{})
-	benchmarkFile(b, m)
-}
-
-func BenchmarkTKVFile(b *testing.B) {
-	m := NewClient(tkvAddr, &Config{})
-	benchmarkFile(b, m)
-}
-
 func benchmarkXattr(b *testing.B, m Meta) {
-	_ = m.Init(Format{Name: "benchmarkXattr"}, true)
-	_ = m.NewSession()
 	b.Run("setxattr", func(b *testing.B) { benchSetXattr(b, m) })
 	b.Run("getxattr", func(b *testing.B) { benchGetXattr(b, m) })
 	b.Run("removexattr", func(b *testing.B) { benchRemoveXattr(b, m) })
@@ -638,67 +604,43 @@ func benchmarkXattr(b *testing.B, m Meta) {
 	b.Run("listxattr_10", func(b *testing.B) { benchListXattr(b, m, 10) })
 }
 
-func BenchmarkRedisXattr(b *testing.B) {
-	m := NewClient(redisAddr, &Config{})
-	benchmarkXattr(b, m)
-}
-
-func BenchmarkSQLXattr(b *testing.B) {
-	m := NewClient(sqlAddr, &Config{})
-	benchmarkXattr(b, m)
-}
-
-func BenchmarkTKVXattr(b *testing.B) {
-	m := NewClient(tkvAddr, &Config{})
-	benchmarkXattr(b, m)
-}
-
 func benchmarkLink(b *testing.B, m Meta) {
-	_ = m.Init(Format{Name: "benchmarkLink"}, true)
-	_ = m.NewSession()
 	b.Run("link", func(b *testing.B) { benchLink(b, m) })
 	b.Run("symlink", func(b *testing.B) { benchSymlink(b, m) })
 	// maybe meaningless since symlink would be cached
 	// b.Run("readlink", func(b *testing.B) { benchReadlink(b, m) })
 }
 
-func BenchmarkRedisLink(b *testing.B) {
-	m := NewClient(redisAddr, &Config{})
-	benchmarkLink(b, m)
-}
-
-func BenchmarkSQLLink(b *testing.B) {
-	m := NewClient(sqlAddr, &Config{})
-	benchmarkLink(b, m)
-}
-
-func BenchmarkTKVLink(b *testing.B) {
-	m := NewClient(tkvAddr, &Config{})
-	benchmarkLink(b, m)
-}
-
 func benchmarkData(b *testing.B, m Meta) {
-	_ = m.Init(Format{Name: "benchmarkData"}, true)
-	m.OnMsg(DeleteChunk, func(args ...interface{}) error { return nil })
+	m.OnMsg(DeleteSlice, func(args ...interface{}) error { return nil })
 	m.OnMsg(CompactChunk, func(args ...interface{}) error { return nil })
-	_ = m.NewSession()
 	b.Run("newchunk", func(b *testing.B) { benchNewChunk(b, m) })
 	b.Run("write", func(b *testing.B) { benchWrite(b, m) })
 	b.Run("read_1", func(b *testing.B) { benchRead(b, m, 1) })
 	b.Run("read_10", func(b *testing.B) { benchRead(b, m, 10) })
 }
 
-func BenchmarkRedisData(b *testing.B) {
+func benchmarkAll(b *testing.B, m Meta) {
+	_ = m.Init(Format{Name: "benchmarkAll"}, true)
+	_ = m.NewSession()
+	benchmarkDir(b, m)
+	benchmarkFile(b, m)
+	benchmarkXattr(b, m)
+	benchmarkLink(b, m)
+	benchmarkData(b, m)
+}
+
+func BenchmarkRedis(b *testing.B) {
 	m := NewClient(redisAddr, &Config{})
-	benchmarkData(b, m)
+	benchmarkAll(b, m)
 }
 
-func BenchmarkSQLData(b *testing.B) {
+func BenchmarkSQL(b *testing.B) {
 	m := NewClient(sqlAddr, &Config{})
-	benchmarkData(b, m)
+	benchmarkAll(b, m)
 }
 
-func BenchmarkTKVData(b *testing.B) {
+func BenchmarkTKV(b *testing.B) {
 	m := NewClient(tkvAddr, &Config{})
-	benchmarkData(b, m)
+	benchmarkAll(b, m)
 }

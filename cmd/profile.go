@@ -1,19 +1,20 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
 	"bufio"
@@ -26,17 +27,65 @@ import (
 	"strings"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
-	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
 )
+
+func cmdProfile() *cli.Command {
+	return &cli.Command{
+		Name:      "profile",
+		Action:    profile,
+		Category:  "INSPECTOR",
+		Usage:     "Show profiling of operations completed in JuiceFS",
+		ArgsUsage: "MOUNTPOINT/LOGFILE",
+		Description: `
+This is a tool that analyzes access log of JuiceFS and shows an overview of recently completed operations.
+
+Examples:
+# Monitor real time operations
+$ juicefs profile /mnt/jfs
+
+# Replay an access log
+$ cat /mnt/jfs/.accesslog > /tmp/jfs.alog
+# Press Ctrl-C to stop the "cat" command after some time
+$ juicefs profile /tmp/jfs.alog
+
+# Analyze an access log and print the total statistics immediately
+$ juicefs profile /tmp/jfs.alog --interval 0
+
+Details: https://juicefs.com/docs/community/operations_profiling`,
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "uid",
+				Aliases: []string{"u"},
+				Usage:   "track only specified UIDs(separated by comma ,)",
+			},
+			&cli.StringFlag{
+				Name:    "gid",
+				Aliases: []string{"g"},
+				Usage:   "track only specified GIDs(separated by comma ,)",
+			},
+			&cli.StringFlag{
+				Name:    "pid",
+				Aliases: []string{"p"},
+				Usage:   "track only specified PIDs(separated by comma ,)",
+			},
+			&cli.Int64Flag{
+				Name:  "interval",
+				Value: 2,
+				Usage: "flush interval in seconds; set it to 0 when replaying a log file to get an immediate result",
+			},
+		},
+	}
+}
 
 var findDigits = regexp.MustCompile(`\d+`)
 
 type profiler struct {
 	file      *os.File
 	replay    bool
-	tty       bool
+	colorful  bool
 	interval  time.Duration
 	uids      []string
 	gids      []string
@@ -196,8 +245,8 @@ func (p *profiler) fastCounter() {
 	p.printTime <- last
 }
 
-func printLines(lines []string, tty bool) {
-	if tty {
+func printLines(lines []string, colorful bool) {
+	if colorful {
 		fmt.Print("\033[2J\033[1;1H") // clear screen
 		fmt.Printf("\033[92m%s\n\033[0m", lines[0])
 		fmt.Printf("\033[97m%s\n\033[0m", lines[1])
@@ -236,7 +285,7 @@ func (p *profiler) flush(timeStamp time.Time, keyStats []keyStat, done bool) {
 	if p.replay {
 		output[1] = fmt.Sprintln("\n[enter]Pause/Continue")
 	}
-	printLines(output, p.tty)
+	printLines(output, p.colorful)
 }
 
 func (p *profiler) flusher() {
@@ -282,10 +331,7 @@ func (p *profiler) flusher() {
 }
 
 func profile(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		logger.Fatalln("Mount point or log file must be provided!")
-	}
+	setup(ctx, 1)
 	logPath := ctx.Args().First()
 	st, err := os.Stat(logPath)
 	if err != nil {
@@ -297,7 +343,7 @@ func profile(ctx *cli.Context) error {
 		if err != nil {
 			logger.Fatalf("Failed to lookup inode for %s: %s", logPath, err)
 		}
-		if inode != 1 {
+		if inode != uint64(meta.RootInode) {
 			logger.Fatalf("Path %s is not a mount point!", logPath)
 		}
 		logPath = path.Join(logPath, ".accesslog")
@@ -317,7 +363,7 @@ func profile(ctx *cli.Context) error {
 	prof := profiler{
 		file:      file,
 		replay:    replay,
-		tty:       isatty.IsTerminal(os.Stdout.Fd()),
+		colorful:  utils.SupportANSIColor(os.Stdout.Fd()),
 		interval:  time.Second * time.Duration(ctx.Int64("interval")),
 		uids:      strings.Split(ctx.String("uid"), ","),
 		gids:      strings.Split(ctx.String("gid"), ","),
@@ -354,43 +400,12 @@ func profile(ctx *cli.Context) error {
 	go prof.flusher()
 	var input string
 	for {
-		fmt.Scanln(&input)
-		if prof.tty {
+		_, _ = fmt.Scanln(&input)
+		if prof.colorful {
 			fmt.Print("\033[1A\033[K") // move cursor back
 		}
 		if prof.replay {
 			prof.pause <- true // pause/continue
 		}
-	}
-}
-
-func profileFlags() *cli.Command {
-	return &cli.Command{
-		Name:      "profile",
-		Usage:     "analyze access log",
-		Action:    profile,
-		ArgsUsage: "MOUNTPOINT/LOGFILE",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:    "uid",
-				Aliases: []string{"u"},
-				Usage:   "track only specified UIDs(separated by comma ,)",
-			},
-			&cli.StringFlag{
-				Name:    "gid",
-				Aliases: []string{"g"},
-				Usage:   "track only specified GIDs(separated by comma ,)",
-			},
-			&cli.StringFlag{
-				Name:    "pid",
-				Aliases: []string{"p"},
-				Usage:   "track only specified PIDs(separated by comma ,)",
-			},
-			&cli.Int64Flag{
-				Name:  "interval",
-				Value: 2,
-				Usage: "flush interval in seconds; set it to 0 when replaying a log file to get an immediate result",
-			},
-		},
 	}
 }

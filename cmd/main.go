@@ -1,120 +1,118 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strconv"
 	"strings"
+	"syscall"
 
-	"github.com/google/gops/agent"
-	"github.com/sirupsen/logrus"
-
+	"github.com/erikdubbelboer/gspt"
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/version"
+	"github.com/pyroscope-io/client/pyroscope"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	// set the correct value when it runs inside container
+	_ "go.uber.org/automaxprocs"
 )
 
 var logger = utils.GetLogger("juicefs")
+var debugAgent string
 
-func globalFlags() []cli.Flag {
-	return []cli.Flag{
-		&cli.BoolFlag{
-			Name:    "verbose",
-			Aliases: []string{"debug", "v"},
-			Usage:   "enable debug log",
-		},
-		&cli.BoolFlag{
-			Name:    "quiet",
-			Aliases: []string{"q"},
-			Usage:   "only warning and errors",
-		},
-		&cli.BoolFlag{
-			Name:  "trace",
-			Usage: "enable trace log",
-		},
-		&cli.BoolFlag{
-			Name:  "no-agent",
-			Usage: "Disable pprof (:6060) and gops (:6070) agent",
-		},
-	}
-}
-
-func main() {
+func Main(args []string) error {
+	// we have to call this because gspt removes all arguments
+	gspt.SetProcTitle(strings.Join(os.Args, " "))
 	cli.VersionFlag = &cli.BoolFlag{
 		Name: "version", Aliases: []string{"V"},
-		Usage: "print only the version",
+		Usage: "print version only",
 	}
 	app := &cli.App{
 		Name:                 "juicefs",
 		Usage:                "A POSIX file system built on Redis and object storage.",
 		Version:              version.Version(),
-		Copyright:            "AGPLv3",
+		Copyright:            "Apache License 2.0",
+		HideHelpCommand:      true,
 		EnableBashCompletion: true,
 		Flags:                globalFlags(),
 		Commands: []*cli.Command{
-			formatFlags(),
-			mountFlags(),
-			umountFlags(),
-			gatewayFlags(),
-			syncFlags(),
-			rmrFlags(),
-			infoFlags(),
-			benchFlags(),
-			gcFlags(),
-			checkFlags(),
-			profileFlags(),
-			statsFlags(),
-			statusFlags(),
-			warmupFlags(),
-			dumpFlags(),
-			loadFlags(),
+			cmdFormat(),
+			cmdConfig(),
+			cmdDestroy(),
+			cmdGC(),
+			cmdFsck(),
+			cmdDump(),
+			cmdLoad(),
+			cmdVersion(),
+			cmdStatus(),
+			cmdStats(),
+			cmdProfile(),
+			cmdInfo(),
+			cmdMount(),
+			cmdUmount(),
+			cmdGateway(),
+			cmdWebDav(),
+			cmdBench(),
+			cmdObjbench(),
+			cmdMdtest(),
+			cmdWarmup(),
+			cmdRmr(),
+			cmdSync(),
+			cmdDebug(),
 		},
 	}
 
-	// Called via mount or fstab.
-	if strings.HasSuffix(os.Args[0], "/mount.juicefs") {
-		if newArgs, err := handleSysMountArgs(); err != nil {
-			log.Fatal(err)
-		} else {
-			os.Args = newArgs
+	if calledViaMount(args) {
+		args = handleSysMountArgs(args)
+		if len(args) < 1 {
+			args = []string{"mount", "--help"}
 		}
 	}
-
-	err := app.Run(reorderOptions(app, os.Args))
-	if err != nil {
-		log.Fatal(err)
+	err := app.Run(reorderOptions(app, args))
+	if errno, ok := err.(syscall.Errno); ok && errno == 0 {
+		err = nil
 	}
+	return err
 }
 
-func handleSysMountArgs() ([]string, error) {
+func calledViaMount(args []string) bool {
+	return strings.HasSuffix(args[0], "/mount.juicefs")
+}
+
+func handleSysMountArgs(args []string) []string {
 	optionToCmdFlag := map[string]string{
 		"attrcacheto":     "attr-cache",
 		"entrycacheto":    "entry-cache",
 		"direntrycacheto": "dir-entry-cache",
 	}
 	newArgs := []string{"juicefs", "mount", "-d"}
-	mountOptions := os.Args[3:]
+	if len(args) < 3 {
+		return nil
+	}
+	mountOptions := args[3:]
 	sysOptions := []string{"_netdev", "rw", "defaults", "remount"}
 	fuseOptions := make([]string, 0, 20)
 	cmdFlagsLookup := make(map[string]bool, 20)
-	for _, f := range append(mountFlags().Flags, globalFlags()...) {
+	for _, f := range append(cmdMount().Flags, globalFlags()...) {
 		if names := f.Names(); len(names) > 0 && len(names[0]) > 1 {
 			_, cmdFlagsLookup[names[0]] = f.(*cli.BoolFlag)
 		}
@@ -133,7 +131,7 @@ func handleSysMountArgs() ([]string, error) {
 		opts := strings.Split(option, ",")
 		for _, opt := range opts {
 			opt = strings.TrimSpace(opt)
-			if opt == "" || stringContains(sysOptions, opt) {
+			if opt == "" || opt == "background" || utils.StringContains(sysOptions, opt) {
 				continue
 			}
 			// Lower case option name is preferred, but if it's the same as flag name, we also accept it
@@ -163,18 +161,9 @@ func handleSysMountArgs() ([]string, error) {
 	if len(fuseOptions) > 0 {
 		newArgs = append(newArgs, "-o", strings.Join(fuseOptions, ","))
 	}
-	newArgs = append(newArgs, os.Args[1], os.Args[2])
+	newArgs = append(newArgs, args[1], args[2])
 	logger.Debug("Parsed mount args: ", strings.Join(newArgs, " "))
-	return newArgs, nil
-}
-
-func stringContains(s []string, e string) bool {
-	for _, item := range s {
-		if item == e {
-			return true
-		}
-	}
-	return false
+	return newArgs
 }
 
 func isFlag(flags []cli.Flag, option string) (bool, bool) {
@@ -234,12 +223,12 @@ func reorderOptions(app *cli.App, args []string) []string {
 		option := args[i]
 		if ok, hasValue := isFlag(cmdFlags, option); ok {
 			newArgs = append(newArgs, option)
-			if hasValue {
+			if hasValue && len(args[i+1:]) > 0 {
 				i++
 				newArgs = append(newArgs, args[i])
 			}
 		} else {
-			if strings.HasPrefix(option, "-") && !stringContains(args, "--generate-bash-completion") {
+			if strings.HasPrefix(option, "-") && !utils.StringContains(args, "--generate-bash-completion") {
 				logger.Fatalf("unknown option: %s", option)
 			}
 			others = append(others, option)
@@ -248,22 +237,14 @@ func reorderOptions(app *cli.App, args []string) []string {
 	return append(newArgs, others...)
 }
 
-func setupAgent(c *cli.Context) {
-	if !c.Bool("no-agent") {
-		go func() {
-			for port := 6060; port < 6100; port++ {
-				_ = http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), nil)
-			}
-		}()
-		go func() {
-			for port := 6070; port < 6100; port++ {
-				_ = agent.Listen(agent.Options{Addr: fmt.Sprintf("127.0.0.1:%d", port)})
-			}
-		}()
+// Check number of positional arguments, set logger level and setup agent if needed
+func setup(c *cli.Context, n int) {
+	if c.NArg() < n {
+		fmt.Printf("ERROR: This command requires at least %d arguments\n", n)
+		fmt.Printf("USAGE:\n   juicefs %s [command options] %s\n", c.Command.Name, c.Command.ArgsUsage)
+		os.Exit(1)
 	}
-}
 
-func setLoggerLevel(c *cli.Context) {
 	if c.Bool("trace") {
 		utils.SetLogLevel(logrus.TraceLevel)
 	} else if c.Bool("verbose") {
@@ -273,5 +254,58 @@ func setLoggerLevel(c *cli.Context) {
 	} else {
 		utils.SetLogLevel(logrus.InfoLevel)
 	}
-	setupAgent(c)
+	if c.Bool("no-color") {
+		utils.DisableLogColor()
+	}
+
+	if !c.Bool("no-agent") {
+		go func() {
+			for port := 6060; port < 6100; port++ {
+				debugAgent = fmt.Sprintf("127.0.0.1:%d", port)
+				_ = http.ListenAndServe(debugAgent, nil)
+			}
+		}()
+	}
+
+	if c.IsSet("pyroscope") {
+		tags := make(map[string]string)
+		appName := fmt.Sprintf("juicefs.%s", c.Command.Name)
+		if c.Command.Name == "mount" {
+			tags["mountpoint"] = c.Args().Get(1)
+		}
+		if hostname, err := os.Hostname(); err == nil {
+			tags["hostname"] = hostname
+		}
+		tags["pid"] = strconv.Itoa(os.Getpid())
+		tags["version"] = version.Version()
+
+		if _, err := pyroscope.Start(pyroscope.Config{
+			ApplicationName: appName,
+			ServerAddress:   c.String("pyroscope"),
+			Logger:          logger,
+			Tags:            tags,
+			AuthToken:       os.Getenv("PYROSCOPE_AUTH_TOKEN"),
+			ProfileTypes:    pyroscope.DefaultProfileTypes,
+		}); err != nil {
+			logger.Errorf("start pyroscope agent: %v", err)
+		}
+	}
+}
+
+func removePassword(uri string) {
+	var uri2 string
+	if strings.Contains(uri, "://") {
+		uri2 = utils.RemovePassword(uri)
+	} else {
+		uri2 = utils.RemovePassword("redis://" + uri)
+	}
+	if uri2 != uri {
+		for i, a := range os.Args {
+			if a == uri {
+				os.Args[i] = uri2
+				break
+			}
+		}
+	}
+	gspt.SetProcTitle(strings.Join(os.Args, " "))
 }

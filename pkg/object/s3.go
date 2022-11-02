@@ -1,18 +1,20 @@
+//go:build !nos3
 // +build !nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -22,9 +24,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -32,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/juicedata/juicefs/pkg/utils"
 )
 
 const awsDefaultRegion = "us-east-1"
@@ -62,7 +69,7 @@ func isExists(err error) bool {
 }
 
 func (s *s3client) Create() error {
-	if _, err := s.List("", "", 1); err == nil {
+	if _, err := s.List("", "", "", 1); err == nil {
 		return nil
 	}
 	_, err := s.s3.CreateBucket(&s3.CreateBucketInput{Bucket: &s.bucket})
@@ -79,6 +86,9 @@ func (s *s3client) Head(key string) (Object, error) {
 	}
 	r, err := s.s3.HeadObject(&param)
 	if err != nil {
+		if e, ok := err.(awserr.RequestFailure); ok && e.StatusCode() == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 	return &obj{
@@ -125,11 +135,13 @@ func (s *s3client) Put(key string, in io.Reader) error {
 		body = bytes.NewReader(data)
 	}
 	checksum := generateChecksum(body)
+	mimeType := utils.GuessMimeType(key)
 	params := &s3.PutObjectInput{
-		Bucket:   &s.bucket,
-		Key:      &key,
-		Body:     body,
-		Metadata: map[string]*string{checksumAlgr: &checksum},
+		Bucket:      &s.bucket,
+		Key:         &key,
+		Body:        body,
+		ContentType: &mimeType,
+		Metadata:    map[string]*string{checksumAlgr: &checksum},
 	}
 	_, err := s.s3.PutObject(params)
 	return err
@@ -152,15 +164,19 @@ func (s *s3client) Delete(key string) error {
 		Key:    &key,
 	}
 	_, err := s.s3.DeleteObject(&param)
+	if err != nil && strings.Contains(err.Error(), "NoSuckKey") {
+		err = nil
+	}
 	return err
 }
 
-func (s *s3client) List(prefix, marker string, limit int64) ([]Object, error) {
+func (s *s3client) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	param := s3.ListObjectsInput{
-		Bucket:  &s.bucket,
-		Prefix:  &prefix,
-		Marker:  &marker,
-		MaxKeys: &limit,
+		Bucket:    &s.bucket,
+		Prefix:    &prefix,
+		Marker:    &marker,
+		MaxKeys:   &limit,
+		Delimiter: &delimiter,
 	}
 	resp, err := s.s3.ListObjects(&param)
 	if err != nil {
@@ -170,12 +186,21 @@ func (s *s3client) List(prefix, marker string, limit int64) ([]Object, error) {
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
+		if !strings.HasPrefix(*o.Key, prefix) || *o.Key < marker {
+			return nil, fmt.Errorf("found invalid key %s from List, prefix: %s, marker: %s", *o.Key, prefix, marker)
+		}
 		objs[i] = &obj{
 			*o.Key,
 			*o.Size,
 			*o.LastModified,
 			strings.HasSuffix(*o.Key, "/"),
 		}
+	}
+	if delimiter != "" {
+		for _, p := range resp.CommonPrefixes {
+			objs = append(objs, &obj{*p.Prefix, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -325,7 +350,14 @@ func parseRegion(endpoint string) string {
 	return region
 }
 
-func newS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newS3(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		if len(strings.Split(endpoint, ".")) > 1 && !strings.HasSuffix(endpoint, ".amazonaws.com") {
+			endpoint = fmt.Sprintf("http://%s", endpoint)
+		} else {
+			endpoint = fmt.Sprintf("https://%s", endpoint)
+		}
+	}
 	endpoint = strings.Trim(endpoint, "/")
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
@@ -351,7 +383,6 @@ func newS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		} else {
 			// compatible s3
 			ep = uri.Host
-			region = awsDefaultRegion
 		}
 	} else {
 		// [BUCKET].[ENDPOINT]
@@ -365,20 +396,44 @@ func newS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		} else {
 			// get region or endpoint
 			if strings.Contains(uri.Host, ".amazonaws.com") {
-				// standard s3
-				// [BUCKET].s3-[REGION].[REST_OF_ENDPOINT]
-				// [BUCKET].s3.[REGION].amazonaws.com[.cn]
-				hostParts = strings.SplitN(uri.Host, ".s3", 2)
-				bucketName = hostParts[0]
-				endpoint = "s3" + hostParts[1]
-				region = parseRegion(endpoint)
+				vpcCompile := regexp.MustCompile(`^.*\.(.*)\.vpce\.amazonaws\.com`)
+				//vpc link
+				if vpcCompile.MatchString(uri.Host) {
+					bucketName = hostParts[0]
+					ep = hostParts[1]
+					if submatch := vpcCompile.FindStringSubmatch(uri.Host); len(submatch) == 2 {
+						region = submatch[1]
+					}
+				} else {
+					// standard s3
+					// [BUCKET].s3-[REGION].[REST_OF_ENDPOINT]
+					// [BUCKET].s3.[REGION].amazonaws.com[.cn]
+					hostParts = strings.SplitN(uri.Host, ".s3", 2)
+					bucketName = hostParts[0]
+					endpoint = "s3" + hostParts[1]
+					region = parseRegion(endpoint)
+				}
 			} else {
 				// compatible s3
 				bucketName = hostParts[0]
 				ep = hostParts[1]
-				region = awsDefaultRegion
+				oracleCompile := regexp.MustCompile(`.*\\.compat\\.objectstorage\\.(.*)\\.oraclecloud\\.com`)
+				if oracleCompile.MatchString(ep) {
+					if submatch := oracleCompile.FindStringSubmatch(ep); len(submatch) == 2 {
+						region = submatch[1]
+					}
+				}
 			}
 		}
+	}
+	if region == "" {
+		region = os.Getenv("AWS_REGION")
+	}
+	if region == "" {
+		region = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	if region == "" {
+		region = awsDefaultRegion
 	}
 
 	ssl := strings.ToLower(uri.Scheme) == "https"
@@ -387,8 +442,10 @@ func newS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		DisableSSL: aws.Bool(!ssl),
 		HTTPClient: httpClient,
 	}
-	if accessKey != "" {
-		awsConfig.Credentials = credentials.NewStaticCredentials(accessKey, secretKey, "")
+	if accessKey == "anonymous" {
+		awsConfig.Credentials = credentials.AnonymousCredentials
+	} else if accessKey != "" {
+		awsConfig.Credentials = credentials.NewStaticCredentials(accessKey, secretKey, token)
 	}
 	if ep != "" {
 		awsConfig.Endpoint = aws.String(ep)

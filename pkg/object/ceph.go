@@ -1,24 +1,27 @@
+//go:build ceph
 // +build ceph
 
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -164,12 +167,28 @@ func (c *ceph) Delete(key string) error {
 	})
 }
 
+func (c *ceph) Head(key string) (Object, error) {
+	var o *obj
+	err := c.do(func(ctx *rados.IOContext) error {
+		stat, err := ctx.Stat(key)
+		if err != nil {
+			return err
+		}
+		o = &obj{key, int64(stat.Size), stat.ModTime, strings.HasSuffix(key, "/")}
+		return nil
+	})
+	if err == rados.ErrNotFound {
+		err = os.ErrNotExist
+	}
+	return o, err
+}
+
 func (c *ceph) ListAll(prefix, marker string) (<-chan Object, error) {
 	var objs = make(chan Object, 1000)
 	err := c.do(func(ctx *rados.IOContext) error {
-		defer close(objs)
 		iter, err := ctx.Iter()
 		if err != nil {
+			close(objs)
 			return err
 		}
 		defer iter.Close()
@@ -186,19 +205,31 @@ func (c *ceph) ListAll(prefix, marker string) (<-chan Object, error) {
 		// the keys are not ordered, sort them first
 		sort.Strings(keys)
 		// TODO: parallel
-		for _, key := range keys {
-			st, err := ctx.Stat(key)
-			if err != nil {
-				continue // FIXME
+		go func() {
+			defer close(objs)
+			for _, key := range keys {
+				st, err := ctx.Stat(key)
+				if err != nil {
+					if errors.Is(err, rados.ErrNotFound) {
+						logger.Warnf("Skip non-existent key: %s", key)
+						continue
+					}
+					objs <- nil
+					logger.Errorf("Stat key %s: %s", key, err)
+					return
+				}
+				objs <- &obj{key, int64(st.Size), st.ModTime, strings.HasSuffix(key, "/")}
 			}
-			objs <- &obj{key, int64(st.Size), st.ModTime, strings.HasSuffix(key, "/")}
-		}
+		}()
 		return nil
 	})
 	return objs, err
 }
 
-func newCeph(endpoint, cluster, user string) (ObjectStorage, error) {
+func newCeph(endpoint, cluster, user, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("ceph://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)

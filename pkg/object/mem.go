@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -56,7 +57,7 @@ func (m *memStore) Head(key string) (Object, error) {
 	}
 	o, ok := m.objects[key]
 	if !ok {
-		return nil, errors.New("not exists")
+		return nil, os.ErrNotExist
 	}
 	f := &file{
 		obj{
@@ -68,6 +69,7 @@ func (m *memStore) Head(key string) (Object, error) {
 		o.owner,
 		o.group,
 		o.mode,
+		false,
 	}
 	return f, nil
 }
@@ -82,6 +84,9 @@ func (m *memStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	d, ok := m.objects[key]
 	if !ok {
 		return nil, errors.New("not exists")
+	}
+	if off > int64(len(d.data)) {
+		off = int64(len(d.data))
 	}
 	data := d.data[off:]
 	if limit > 0 && limit < int64(len(data)) {
@@ -99,47 +104,13 @@ func (m *memStore) Put(key string, in io.Reader) error {
 	}
 	_, ok := m.objects[key]
 	if ok {
-		return errors.New("can't overwrite")
+		logger.Debugf("overwrite %s", key)
 	}
 	data, err := ioutil.ReadAll(in)
 	if err != nil {
 		return err
 	}
 	m.objects[key] = &mobj{data: data, mtime: time.Now()}
-	return nil
-}
-
-func (m *memStore) Chmod(key string, mode os.FileMode) error {
-	m.Lock()
-	defer m.Unlock()
-	obj, ok := m.objects[key]
-	if !ok {
-		return errors.New("not found")
-	}
-	obj.mode = mode
-	return nil
-}
-
-func (m *memStore) Chown(key string, owner, group string) error {
-	m.Lock()
-	defer m.Unlock()
-	obj, ok := m.objects[key]
-	if !ok {
-		return errors.New("not found")
-	}
-	obj.owner = owner
-	obj.group = group
-	return nil
-}
-
-func (m *memStore) Chtimes(key string, mtime time.Time) error {
-	m.Lock()
-	defer m.Unlock()
-	obj, ok := m.objects[key]
-	if !ok {
-		return errors.New("not found")
-	}
-	obj.mtime = mtime
 	return nil
 }
 
@@ -158,7 +129,10 @@ func (m *memStore) Delete(key string) error {
 	return nil
 }
 
-func (m *memStore) List(prefix, marker string, limit int64) ([]Object, error) {
+func (m *memStore) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+	if delimiter != "" {
+		return nil, notSupportedDelimiter
+	}
 	m.Lock()
 	defer m.Unlock()
 
@@ -176,6 +150,7 @@ func (m *memStore) List(prefix, marker string, limit int64) ([]Object, error) {
 				o.owner,
 				o.group,
 				o.mode,
+				false,
 			}
 			objs = append(objs, f)
 		}
@@ -189,7 +164,11 @@ func (m *memStore) List(prefix, marker string, limit int64) ([]Object, error) {
 	return objs, nil
 }
 
-func newMem(endpoint, accesskey, secretkey string) (ObjectStorage, error) {
+func (m *memStore) ListAll(prefix, marker string) (<-chan Object, error) {
+	return nil, notSupported
+}
+
+func newMem(endpoint, accesskey, secretkey, token string) (ObjectStorage, error) {
 	store := &memStore{name: endpoint}
 	store.objects = make(map[string]*mobj)
 	return store, nil

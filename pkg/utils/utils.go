@@ -1,28 +1,32 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package utils
 
 import (
-	"io"
+	"fmt"
+	"mime"
+	"net"
 	"os"
+	"path"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
-	"github.com/vbauerster/mpb/v7"
-	"github.com/vbauerster/mpb/v7/decor"
 )
 
 // Min returns min of 2 int
@@ -36,26 +40,7 @@ func Min(a, b int) int {
 // Exists checks if the file/folder in given path exists
 func Exists(path string) bool {
 	_, err := os.Stat(path)
-	return err == nil
-}
-
-// CopyFile copies file in src path to dst path
-func CopyFile(dst, src string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return err
-	}
-	return out.Close()
+	return err == nil || !os.IsNotExist(err)
 }
 
 // SplitDir splits a path with default path list separator or comma.
@@ -67,49 +52,82 @@ func SplitDir(d string) []string {
 	return dd
 }
 
-// NewDynProgressBar init a dynamic progress bar,the title will appears at the head of the progress bar
-func NewDynProgressBar(title string, quiet bool) (*mpb.Progress, *mpb.Bar) {
-	var progress *mpb.Progress
-	if !quiet && isatty.IsTerminal(os.Stdout.Fd()) {
-		progress = mpb.New(mpb.WithWidth(64))
-	} else {
-		progress = mpb.New(mpb.WithWidth(64), mpb.WithOutput(nil))
+// GetLocalIp get the local ip used to access remote address.
+func GetLocalIp(address string) (string, error) {
+	conn, err := net.Dial("udp", address)
+	if err != nil {
+		return "", err
 	}
-	bar := progress.AddBar(0,
-		mpb.PrependDecorators(
-			decor.Name(title, decor.WCSyncWidth),
-			decor.CountersNoUnit("%d / %d"),
-		),
-		mpb.AppendDecorators(
-			decor.OnComplete(decor.Percentage(decor.WC{W: 5}), "done"),
-		),
-	)
-	return progress, bar
+	ip, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		return "", err
+	}
+	return ip, nil
 }
 
-// NewProgressCounter init a progress counter
-func NewProgressCounter(title string) (*mpb.Progress, *mpb.Bar) {
-	var progress *mpb.Progress
-	if isatty.IsTerminal(os.Stdout.Fd()) {
-		progress = mpb.New(mpb.WithWidth(64))
-	} else {
-		progress = mpb.New(mpb.WithWidth(64), mpb.WithOutput(nil))
+func WithTimeout(f func() error, timeout time.Duration) error {
+	var done = make(chan int, 1)
+	var t = time.NewTimer(timeout)
+	var err error
+	go func() {
+		err = f()
+		done <- 1
+	}()
+	select {
+	case <-done:
+		t.Stop()
+	case <-t.C:
+		err = fmt.Errorf("timeout after %s", timeout)
 	}
-	bar := progress.Add(0,
-		NewSpinner(),
-		mpb.PrependDecorators(
-			decor.Name(title, decor.WCSyncWidth),
-			decor.CurrentNoUnit("%d", decor.WCSyncWidthR),
-		),
-		mpb.BarFillerClearOnComplete(),
-	)
-	return progress, bar
+	return err
 }
 
-func NewSpinner() mpb.BarFiller {
-	spinnerStyle := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	for i, s := range spinnerStyle {
-		spinnerStyle[i] = "\033[1;32m" + s + "\033[0m"
+func RemovePassword(uri string) string {
+	p := strings.Index(uri, "@")
+	if p < 0 {
+		return uri
 	}
-	return mpb.NewBarFiller(mpb.SpinnerStyle(spinnerStyle...))
+	sp := strings.Index(uri, "://") + 3
+	if sp == 2 {
+		sp = 0
+	}
+	cp := strings.Index(uri[sp:], ":")
+	if cp < 0 || sp+cp > p {
+		return uri
+	}
+	return uri[:sp+cp] + ":****" + uri[p:]
+}
+
+func GuessMimeType(key string) string {
+	mimeType := mime.TypeByExtension(path.Ext(key))
+	if !strings.ContainsRune(mimeType, '/') {
+		mimeType = "application/octet-stream"
+	}
+	return mimeType
+}
+
+func StringContains(s []string, e string) bool {
+	for _, item := range s {
+		if item == e {
+			return true
+		}
+	}
+	return false
+}
+
+func FormatBytes(n uint64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d Bytes", n)
+	}
+	units := []string{"K", "M", "G", "T", "P", "E"}
+	m := n
+	i := 0
+	for ; i < len(units)-1 && m >= 1<<20; i++ {
+		m = m >> 10
+	}
+	return fmt.Sprintf("%.2f %siB (%d Bytes)", float64(m)/1024.0, units[i], n)
+}
+
+func SupportANSIColor(fd uintptr) bool {
+	return isatty.IsTerminal(fd) && runtime.GOOS != "windows"
 }

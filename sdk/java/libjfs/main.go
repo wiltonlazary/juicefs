@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package main
@@ -41,6 +42,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/juicedata/juicefs/cmd"
 	"github.com/juicedata/juicefs/pkg/chunk"
 	"github.com/juicedata/juicefs/pkg/fs"
 	"github.com/juicedata/juicefs/pkg/meta"
@@ -51,21 +53,24 @@ import (
 	"github.com/juicedata/juicefs/pkg/version"
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/push"
-
 	"github.com/sirupsen/logrus"
 )
 
 var (
-	filesLock     sync.Mutex
-	openFiles     = make(map[int]*fwrapper)
-	minFreeHandle = 1
+	filesLock  sync.Mutex
+	openFiles  = make(map[int]*fwrapper)
+	nextHandle = 1
 
 	fslock   sync.Mutex
 	handlers = make(map[uintptr]*wrapper)
 	activefs = make(map[string][]*wrapper)
 	logger   = utils.GetLogger("juicefs")
-	pusher   *push.Pusher
+	bOnce    sync.Once
+	bridges  []*Bridge
+	pOnce    sync.Once
+	pushers  []*push.Pusher
 )
 
 const (
@@ -145,6 +150,18 @@ func (w *wrapper) withPid(pid int) meta.Context {
 	return ctx
 }
 
+func (w *wrapper) isSuperuser(name string, groups []string) bool {
+	if name == w.superuser {
+		return true
+	}
+	for _, g := range groups {
+		if g == w.supergroup {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *wrapper) lookupUid(name string) uint32 {
 	if name == w.superuser {
 		return 0
@@ -170,7 +187,7 @@ func (w *wrapper) lookupGids(groups string) []uint32 {
 func (w *wrapper) uid2name(uid uint32) string {
 	name := w.superuser
 	if uid > 0 {
-		name = w.m.lookupUserID(int(uid))
+		name = w.m.lookupUserID(uid)
 	}
 	return name
 }
@@ -178,7 +195,7 @@ func (w *wrapper) uid2name(uid uint32) string {
 func (w *wrapper) gid2name(gid uint32) string {
 	group := w.supergroup
 	if gid > 0 {
-		group = w.m.lookupGroupID(int(gid))
+		group = w.m.lookupGroupID(gid)
 	}
 	return group
 }
@@ -191,10 +208,10 @@ type fwrapper struct {
 func nextFileHandle(f *fs.File, w *wrapper) int {
 	filesLock.Lock()
 	defer filesLock.Unlock()
-	for i := minFreeHandle; ; i++ {
+	for i := nextHandle; ; i++ {
 		if _, ok := openFiles[i]; !ok {
 			openFiles[i] = &fwrapper{f, w}
-			minFreeHandle = i + 1
+			nextHandle = i + 1
 			return i
 		}
 	}
@@ -206,40 +223,46 @@ func freeHandle(fd int) {
 	f := openFiles[fd]
 	if f != nil {
 		delete(openFiles, fd)
-		if fd < minFreeHandle {
-			minFreeHandle = fd
-		}
 	}
 }
 
 type javaConf struct {
-	MetaURL         string  `json:"meta"`
-	ReadOnly        bool    `json:"readOnly"`
-	OpenCache       float64 `json:"openCache"`
-	CacheDir        string  `json:"cacheDir"`
-	CacheSize       int64   `json:"cacheSize"`
-	FreeSpace       string  `json:"freeSpace"`
-	AutoCreate      bool    `json:"autoCreate"`
-	CacheFullBlock  bool    `json:"cacheFullBlock"`
-	Writeback       bool    `json:"writeback"`
-	MemorySize      int     `json:"memorySize"`
-	Prefetch        int     `json:"prefetch"`
-	Readahead       int     `json:"readahead"`
-	UploadLimit     int     `json:"uploadLimit"`
-	DownloadLimit   int     `json:"downloadLimit"`
-	MaxUploads      int     `json:"maxUploads"`
-	GetTimeout      int     `json:"getTimeout"`
-	PutTimeout      int     `json:"putTimeout"`
-	FastResolve     bool    `json:"fastResolve"`
-	AttrTimeout     float64 `json:"attrTimeout"`
-	EntryTimeout    float64 `json:"entryTimeout"`
-	DirEntryTimeout float64 `json:"dirEntryTimeout"`
-	Debug           bool    `json:"debug"`
-	NoUsageReport   bool    `json:"noUsageReport"`
-	AccessLog       string  `json:"accessLog"`
-	PushGateway     string  `json:"pushGateway"`
-	PushInterval    int     `json:"pushInterval"`
-	PushAuth        string  `json:"pushAuth"`
+	MetaURL           string  `json:"meta"`
+	Bucket            string  `json:"bucket"`
+	ReadOnly          bool    `json:"readOnly"`
+	NoBGJob           bool    `json:"noBGJob"`
+	OpenCache         float64 `json:"openCache"`
+	BackupMeta        int64   `json:"backupMeta"`
+	Heartbeat         int     `json:"heartbeat"`
+	CacheDir          string  `json:"cacheDir"`
+	CacheSize         int64   `json:"cacheSize"`
+	FreeSpace         string  `json:"freeSpace"`
+	AutoCreate        bool    `json:"autoCreate"`
+	CacheFullBlock    bool    `json:"cacheFullBlock"`
+	CacheChecksum     string  `json:"cacheChecksum"`
+	CacheScanInterval int     `json:"cacheScanInterval"`
+	Writeback         bool    `json:"writeback"`
+	MemorySize        int     `json:"memorySize"`
+	Prefetch          int     `json:"prefetch"`
+	Readahead         int     `json:"readahead"`
+	UploadLimit       int     `json:"uploadLimit"`
+	DownloadLimit     int     `json:"downloadLimit"`
+	MaxUploads        int     `json:"maxUploads"`
+	MaxDeletes        int     `json:"maxDeletes"`
+	IORetries         int     `json:"ioRetries"`
+	GetTimeout        int     `json:"getTimeout"`
+	PutTimeout        int     `json:"putTimeout"`
+	FastResolve       bool    `json:"fastResolve"`
+	AttrTimeout       float64 `json:"attrTimeout"`
+	EntryTimeout      float64 `json:"entryTimeout"`
+	DirEntryTimeout   float64 `json:"dirEntryTimeout"`
+	Debug             bool    `json:"debug"`
+	NoUsageReport     bool    `json:"noUsageReport"`
+	AccessLog         string  `json:"accessLog"`
+	PushGateway       string  `json:"pushGateway"`
+	PushInterval      int     `json:"pushInterval"`
+	PushAuth          string  `json:"pushAuth"`
+	PushGraphite      string  `json:"pushGraphite"`
 }
 
 func getOrCreate(name, user, group, superuser, supergroup string, f func() *fs.FileSystem) uintptr {
@@ -260,29 +283,69 @@ func getOrCreate(name, user, group, superuser, supergroup string, f func() *fs.F
 		logger.Infof("JuiceFileSystem created for user:%s group:%s", user, group)
 	}
 	w := &wrapper{jfs, nil, m, user, superuser, supergroup}
-	w.ctx = meta.NewContext(uint32(os.Getpid()), w.lookupUid(user), w.lookupGids(group))
-	// root is a normal user in Hadoop, but super user in POSIX (ignored in GUID mapping)
-	// woraround: lookup it here to create a bidirectional mapping
-	w.lookupUid("root")
-	w.lookupGid("root")
+	if w.isSuperuser(user, strings.Split(group, ",")) {
+		w.ctx = meta.NewContext(uint32(os.Getpid()), 0, []uint32{0})
+	} else {
+		w.ctx = meta.NewContext(uint32(os.Getpid()), w.lookupUid(user), w.lookupGids(group))
+	}
 	activefs[name] = append(ws, w)
 	h := uintptr(unsafe.Pointer(w)) & 0x7fffffff // low 32bits
 	handlers[h] = w
 	return h
 }
 
-func createStorage(format *meta.Format) (object.ObjectStorage, error) {
-	var blob object.ObjectStorage
-	var err error
-	if format.Shards > 1 {
-		blob, err = object.NewSharded(strings.ToLower(format.Storage), format.Bucket, format.AccessKey, format.SecretKey, format.Shards)
+func push2Gateway(pushGatewayAddr, pushAuth string, pushInterVal time.Duration, registry *prometheus.Registry, commonLabels map[string]string) {
+	pusher := push.New(pushGatewayAddr, "juicefs").Gatherer(registry)
+	for k, v := range commonLabels {
+		pusher.Grouping(k, v)
+	}
+	if pushAuth != "" {
+		if strings.Contains(pushAuth, ":") {
+			parts := strings.Split(pushAuth, ":")
+			pusher.BasicAuth(parts[0], parts[1])
+		}
+	}
+	pushers = append(pushers, pusher)
+
+	pOnce.Do(func() {
+		go func() {
+			for range time.NewTicker(pushInterVal).C {
+				for _, pusher := range pushers {
+					if err := pusher.Push(); err != nil {
+						logger.Warnf("error pushing to PushGateway: %s", err)
+					}
+				}
+			}
+		}()
+	})
+}
+
+func push2Graphite(graphite string, pushInterVal time.Duration, registry *prometheus.Registry, commonLabels map[string]string) {
+	if bridge, err := NewBridge(&Config{
+		URL:           graphite,
+		Gatherer:      registry,
+		UseTags:       true,
+		Timeout:       2 * time.Second,
+		ErrorHandling: ContinueOnError,
+		Logger:        logger,
+		CommonLabels:  commonLabels,
+	}); err != nil {
+		logger.Warnf("NewBridge error:%s", err)
 	} else {
-		blob, err = object.CreateStorage(strings.ToLower(format.Storage), format.Bucket, format.AccessKey, format.SecretKey)
+		bridges = append(bridges, bridge)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return object.WithPrefix(blob, format.Name+"/"), nil
+
+	bOnce.Do(func() {
+		go func() {
+			for range time.NewTicker(pushInterVal).C {
+				for _, brg := range bridges {
+					if err := brg.Push(); err != nil {
+						logger.Warnf("error pushing to Graphite: %s", err)
+					}
+				}
+			}
+		}()
+	})
 }
 
 //export jfs_init
@@ -294,7 +357,8 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 		var jConf javaConf
 		err := json.Unmarshal([]byte(C.GoString(jsonConf)), &jConf)
 		if err != nil {
-			logger.Fatalf("invalid json: %s", C.GoString(jsonConf))
+			logger.Errorf("invalid json: %s", C.GoString(jsonConf))
+			return nil
 		}
 		if jConf.Debug || os.Getenv("JUICEFS_DEBUG") != "" {
 			utils.SetLogLevel(logrus.DebugLevel)
@@ -316,105 +380,114 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			utils.SetLogLevel(logrus.WarnLevel)
 		}
 
-		addr := jConf.MetaURL
-		m := meta.NewClient(addr, &meta.Config{
-			Retries:   10,
+		metaConf := &meta.Config{
+			Retries:   jConf.IORetries,
 			Strict:    true,
 			ReadOnly:  jConf.ReadOnly,
+			NoBGJob:   jConf.NoBGJob,
 			OpenCache: time.Duration(jConf.OpenCache * 1e9),
-		})
-		format, err := m.Load()
-		if err != nil {
-			logger.Fatalf("load setting: %s", err)
+			Heartbeat: time.Second * time.Duration(jConf.Heartbeat),
 		}
-
-		if jConf.PushGateway != "" && pusher == nil {
-			prometheus.DefaultRegisterer = prometheus.WrapRegistererWithPrefix("juicefs_", prometheus.DefaultRegisterer)
-			// TODO: support multiple volumes
-			pusher = push.New(jConf.PushGateway, "juicefs").Gatherer(prometheus.DefaultGatherer)
-			pusher = pusher.Grouping("vol_name", format.Name).Grouping("mp", "sdk-"+strconv.Itoa(os.Getpid()))
+		m := meta.NewClient(jConf.MetaURL, metaConf)
+		format, err := m.Load(true)
+		if err != nil {
+			logger.Errorf("load setting: %s", err)
+			return nil
+		}
+		var registerer prometheus.Registerer
+		if jConf.PushGateway != "" || jConf.PushGraphite != "" {
+			commonLabels := prometheus.Labels{"vol_name": name, "mp": "sdk-" + strconv.Itoa(os.Getpid())}
 			if h, err := os.Hostname(); err == nil {
-				pusher = pusher.Grouping("instance", h)
+				commonLabels["instance"] = h
 			} else {
 				logger.Warnf("cannot get hostname: %s", err)
 			}
-			if strings.Contains(jConf.PushAuth, ":") {
-				parts := strings.Split(jConf.PushAuth, ":")
-				pusher = pusher.BasicAuth(parts[0], parts[1])
-			}
-			interval := time.Second * 10
+			registry := prometheus.NewRegistry()
+			registerer = prometheus.WrapRegistererWithPrefix("juicefs_", registry)
+			registerer.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+			registerer.MustRegister(collectors.NewGoCollector())
+
+			var interval time.Duration
 			if jConf.PushInterval > 0 {
 				interval = time.Second * time.Duration(jConf.PushInterval)
 			}
-			go func() {
-				for {
-					time.Sleep(interval)
-					if err := pusher.Push(); err != nil {
-						logger.Warnf("push metrics to %s: %s", jConf.PushGateway, err)
-					}
-				}
-			}()
-			meta.InitMetrics()
-			vfs.InitMetrics()
-			go metric.UpdateMetrics(m)
+			if jConf.PushGraphite != "" {
+				push2Graphite(jConf.PushGraphite, interval, registry, commonLabels)
+			}
+			if jConf.PushGateway != "" {
+				push2Gateway(jConf.PushGateway, jConf.PushAuth, interval, registry, commonLabels)
+			}
+			m.InitMetrics(registerer)
+			vfs.InitMetrics(registerer)
+			go metric.UpdateMetrics(m, registerer)
 		}
 
-		blob, err := createStorage(format)
+		if jConf.Bucket != "" {
+			format.Bucket = jConf.Bucket
+		}
+		blob, err := cmd.NewReloadableStorage(format, func() (*meta.Format, error) {
+			format, err := m.Load(true)
+			if err == nil {
+				if jConf.Bucket != "" {
+					format.Bucket = jConf.Bucket
+				}
+			}
+			return format, err
+		})
 		if err != nil {
-			logger.Fatalf("object storage: %s", err)
+			logger.Errorf("object storage: %s", err)
+			return nil
 		}
 		logger.Infof("Data use %s", blob)
-		blob = object.NewLimited(blob, int64(jConf.UploadLimit)*1e6/8, int64(jConf.DownloadLimit)*1e6/8)
 
 		var freeSpaceRatio = 0.1
 		if jConf.FreeSpace != "" {
 			freeSpaceRatio, _ = strconv.ParseFloat(jConf.FreeSpace, 64)
 		}
 		chunkConf := chunk.Config{
-			BlockSize:      format.BlockSize * 1024,
-			Compress:       format.Compression,
-			CacheDir:       jConf.CacheDir,
-			CacheMode:      0644, // all user can read cache
-			CacheSize:      jConf.CacheSize,
-			FreeSpace:      float32(freeSpaceRatio),
-			AutoCreate:     jConf.AutoCreate,
-			CacheFullBlock: jConf.CacheFullBlock,
-			MaxUpload:      jConf.MaxUploads,
-			Prefetch:       jConf.Prefetch,
-			Writeback:      jConf.Writeback,
-			Partitions:     format.Partitions,
-			GetTimeout:     time.Second * time.Duration(jConf.GetTimeout),
-			PutTimeout:     time.Second * time.Duration(jConf.PutTimeout),
-			BufferSize:     jConf.MemorySize << 20,
-			Readahead:      jConf.Readahead << 20,
+			BlockSize:         format.BlockSize * 1024,
+			Compress:          format.Compression,
+			CacheDir:          jConf.CacheDir,
+			CacheMode:         0644, // all user can read cache
+			CacheSize:         jConf.CacheSize,
+			FreeSpace:         float32(freeSpaceRatio),
+			AutoCreate:        jConf.AutoCreate,
+			CacheFullBlock:    jConf.CacheFullBlock,
+			CacheChecksum:     jConf.CacheChecksum,
+			CacheScanInterval: time.Second * time.Duration(jConf.CacheScanInterval),
+			MaxUpload:         jConf.MaxUploads,
+			MaxDeletes:        jConf.MaxDeletes,
+			MaxRetries:        jConf.IORetries,
+			UploadLimit:       int64(jConf.UploadLimit) * 1e6 / 8,
+			DownloadLimit:     int64(jConf.DownloadLimit) * 1e6 / 8,
+			Prefetch:          jConf.Prefetch,
+			Writeback:         jConf.Writeback,
+			HashPrefix:        format.HashPrefix,
+			GetTimeout:        time.Second * time.Duration(jConf.GetTimeout),
+			PutTimeout:        time.Second * time.Duration(jConf.PutTimeout),
+			BufferSize:        jConf.MemorySize << 20,
+			Readahead:         jConf.Readahead << 20,
 		}
-		if chunkConf.CacheDir != "memory" {
-			ds := utils.SplitDir(chunkConf.CacheDir)
-			for i := range ds {
-				ds[i] = filepath.Join(ds[i], format.UUID)
-			}
-			chunkConf.CacheDir = strings.Join(ds, string(os.PathListSeparator))
-		}
-		store := chunk.NewCachedStore(blob, chunkConf)
-		m.OnMsg(meta.DeleteChunk, meta.MsgCallback(func(args ...interface{}) error {
-			chunkid := args[0].(uint64)
+		chunkConf.SelfCheck(format.UUID)
+		store := chunk.NewCachedStore(blob, chunkConf, registerer)
+		m.OnMsg(meta.DeleteSlice, func(args ...interface{}) error {
+			id := args[0].(uint64)
 			length := args[1].(uint32)
-			return store.Remove(chunkid, int(length))
-		}))
-		m.OnMsg(meta.CompactChunk, meta.MsgCallback(func(args ...interface{}) error {
+			return store.Remove(id, int(length))
+		})
+		m.OnMsg(meta.CompactChunk, func(args ...interface{}) error {
 			slices := args[0].([]meta.Slice)
-			chunkid := args[1].(uint64)
-			return vfs.Compact(chunkConf, store, slices, chunkid)
-		}))
+			id := args[1].(uint64)
+			return vfs.Compact(chunkConf, store, slices, id)
+		})
 		err = m.NewSession()
 		if err != nil {
-			logger.Fatalf("new session: %s", err)
+			logger.Errorf("new session: %s", err)
+			return nil
 		}
 
 		conf := &vfs.Config{
-			Meta: &meta.Config{
-				Retries: 10,
-			},
+			Meta:            metaConf,
 			Format:          format,
 			Chunk:           &chunkConf,
 			AttrTimeout:     time.Millisecond * time.Duration(jConf.AttrTimeout*1000),
@@ -422,6 +495,10 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			DirEntryTimeout: time.Millisecond * time.Duration(jConf.DirEntryTimeout*1000),
 			AccessLog:       jConf.AccessLog,
 			FastResolve:     jConf.FastResolve,
+			BackupMeta:      time.Second * time.Duration(jConf.BackupMeta),
+		}
+		if !jConf.ReadOnly && !jConf.NoBGJob && conf.BackupMeta > 0 {
+			go vfs.Backup(m, blob, conf.BackupMeta)
 		}
 		if !jConf.NoUsageReport {
 			go usage.ReportUsage(m, "java-sdk "+version.Version())
@@ -431,6 +508,7 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			logger.Errorf("Initialize failed: %s", err)
 			return nil
 		}
+		jfs.InitMetrics(registerer)
 		return jfs
 	})
 }
@@ -455,8 +533,8 @@ func jfs_update_uid_grouping(h uintptr, uidstr *C.char, grouping *C.char) {
 				continue
 			}
 			username := strings.TrimSpace(fields[0])
-			uid, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
-			uids = append(uids, pwent{uid, username})
+			uid, _ := strconv.ParseUint(strings.TrimSpace(fields[1]), 10, 32)
+			uids = append(uids, pwent{uint32(uid), username})
 		}
 
 		var buffer bytes.Buffer
@@ -475,8 +553,8 @@ func jfs_update_uid_grouping(h uintptr, uidstr *C.char, grouping *C.char) {
 				continue
 			}
 			gname := strings.TrimSpace(fields[0])
-			gid, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
-			gids = append(gids, pwent{gid, gname})
+			gid, _ := strconv.ParseUint(strings.TrimSpace(fields[1]), 10, 32)
+			gids = append(gids, pwent{uint32(gid), gname})
 			if len(fields) > 2 {
 				for _, user := range strings.Split(fields[len(fields)-1], ",") {
 					if strings.TrimSpace(user) == w.user {
@@ -487,13 +565,17 @@ func jfs_update_uid_grouping(h uintptr, uidstr *C.char, grouping *C.char) {
 		}
 		logger.Debugf("Update groups of %s to %s", w.user, strings.Join(groups, ","))
 	}
-	w.m.update(uids, gids)
+	w.m.update(uids, gids, false)
 
-	curGids := w.ctx.Gids()
-	if len(groups) > 0 {
-		curGids = w.lookupGids(strings.Join(groups, ","))
+	if w.isSuperuser(w.user, groups) {
+		w.ctx = meta.NewContext(uint32(os.Getpid()), 0, []uint32{0})
+	} else {
+		gids := w.ctx.Gids()
+		if len(groups) > 0 {
+			gids = w.lookupGids(strings.Join(groups, ","))
+		}
+		w.ctx = meta.NewContext(uint32(os.Getpid()), w.lookupUid(w.user), gids)
 	}
-	w.ctx = meta.NewContext(uint32(os.Getpid()), w.lookupUid(w.user), curGids)
 }
 
 //export jfs_term
@@ -512,7 +594,7 @@ func jfs_term(pid int, h uintptr) int {
 			m.Add(1)
 			go func(f *fs.File) {
 				defer m.Done()
-				f.Close(ctx)
+				_ = f.Close(ctx)
 			}(f.File)
 			toClose = append(toClose, fd)
 		}
@@ -533,7 +615,7 @@ func jfs_term(pid int, h uintptr) int {
 					ws[i] = ws[len(ws)-1]
 					activefs[name] = ws[:len(ws)-1]
 				} else {
-					w.Flush()
+					_ = w.Flush()
 					// don't close the filesystem, so it can be re-used later
 					// w.Close()
 					// delete(activefs, name)
@@ -541,9 +623,14 @@ func jfs_term(pid int, h uintptr) int {
 			}
 		}
 	}
-	if pusher != nil {
+	for _, bridge := range bridges {
+		if err := bridge.Push(); err != nil {
+			logger.Warnf("error pushing to Graphite: %s", err)
+		}
+	}
+	for _, pusher := range pushers {
 		if err := pusher.Push(); err != nil {
-			logger.Warnf("push metrics: %s", err)
+			logger.Warnf("error pushing to PushGatway: %s", err)
 		}
 	}
 	return 0
@@ -587,6 +674,10 @@ func jfs_create(pid int, h uintptr, cpath *C.char, mode uint16) int {
 	if err != 0 {
 		return errno(err)
 	}
+	if w.ctx.Uid() == 0 && w.user != w.superuser {
+		// belongs to supergroup
+		_ = setOwner(w, w.withPid(pid), C.GoString(cpath), w.user, "")
+	}
 	return nextFileHandle(f, w)
 }
 
@@ -596,7 +687,12 @@ func jfs_mkdir(pid int, h uintptr, cpath *C.char, mode C.mode_t) int {
 	if w == nil {
 		return EINVAL
 	}
-	return errno(w.Mkdir(w.withPid(pid), C.GoString(cpath), uint16(mode)))
+	err := errno(w.Mkdir(w.withPid(pid), C.GoString(cpath), uint16(mode)))
+	if err == 0 && w.ctx.Uid() == 0 && w.user != w.superuser {
+		// belongs to supergroup
+		_ = setOwner(w, w.withPid(pid), C.GoString(cpath), w.user, "")
+	}
+	return err
 }
 
 //export jfs_delete
@@ -664,7 +760,7 @@ func jfs_getXattr(pid int, h uintptr, path *C.char, name *C.char, buf uintptr, b
 	if len(buff) >= bufsize {
 		return bufsize
 	}
-	copy(toBuf(uintptr(buf), bufsize), buff)
+	copy(toBuf(buf, bufsize), buff)
 	return len(buff)
 }
 
@@ -681,7 +777,7 @@ func jfs_listXattr(pid int, h uintptr, path *C.char, buf uintptr, bufsize int) i
 	if len(buff) >= bufsize {
 		return bufsize
 	}
-	copy(toBuf(uintptr(buf), bufsize), buff)
+	copy(toBuf(buf, bufsize), buff)
 	return len(buff)
 }
 
@@ -775,7 +871,7 @@ func jfs_summary(pid int, h uintptr, cpath *C.char, buf uintptr) int {
 		return errno(err)
 	}
 	defer f.Close(ctx)
-	summary, err := f.Summary(ctx, 0, 1)
+	summary, err := f.Summary(ctx)
 	if err != 0 {
 		return errno(err)
 	}
@@ -813,20 +909,6 @@ func jfs_chmod(pid int, h uintptr, cpath *C.char, mode C.mode_t) int {
 	return errno(f.Chmod(w.withPid(pid), uint16(mode)))
 }
 
-//export jfs_chown
-func jfs_chown(pid int, h uintptr, cpath *C.char, uid uint32, gid uint32) int {
-	w := F(h)
-	if w == nil {
-		return EINVAL
-	}
-	f, err := w.Open(w.withPid(pid), C.GoString(cpath), 0)
-	if err != 0 {
-		return errno(err)
-	}
-	defer f.Close(w.withPid(pid))
-	return errno(f.Chown(w.withPid(pid), uid, gid))
-}
-
 //export jfs_utime
 func jfs_utime(pid int, h uintptr, cpath *C.char, mtime, atime int64) int {
 	w := F(h)
@@ -847,21 +929,25 @@ func jfs_setOwner(pid int, h uintptr, cpath *C.char, owner *C.char, group *C.cha
 	if w == nil {
 		return EINVAL
 	}
-	f, err := w.Open(w.withPid(pid), C.GoString(cpath), 0)
+	return setOwner(w, w.withPid(pid), C.GoString(cpath), C.GoString(owner), C.GoString(group))
+}
+
+func setOwner(w *wrapper, ctx meta.Context, path string, owner, group string) int {
+	f, err := w.Open(ctx, path, 0)
 	if err != 0 {
 		return errno(err)
 	}
-	defer f.Close(w.withPid(pid))
+	defer f.Close(ctx)
 	st, _ := f.Stat()
 	uid := uint32(st.(*fs.FileStat).Uid())
 	gid := uint32(st.(*fs.FileStat).Gid())
-	if owner != nil {
-		uid = w.lookupUid(C.GoString(owner))
+	if owner != "" {
+		uid = w.lookupUid(owner)
 	}
-	if group != nil {
-		gid = w.lookupGid(C.GoString(group))
+	if group != "" {
+		gid = w.lookupGid(group)
 	}
-	return errno(f.Chown(w.withPid(pid), uid, gid))
+	return errno(f.Chown(ctx, uid, gid))
 }
 
 //export jfs_listdir
@@ -959,17 +1045,34 @@ func jfs_concat(pid int, h uintptr, _dst *C.char, buf uintptr, bufsize int) int 
 
 	dfi, _ := df.Stat()
 	_, err = w.CopyFileRange(ctx, tmp, 0, dst, uint64(dfi.Size()), 1<<63)
-	return errno(err)
+	r := errno(err)
+	if r == 0 {
+		var wg sync.WaitGroup
+		var limit = make(chan bool, 100)
+		for _, src := range srcs {
+			limit <- true
+			wg.Add(1)
+			go func(p string) {
+				defer func() { <-limit }()
+				defer wg.Done()
+				if r := w.Delete(ctx, p); r != 0 {
+					logger.Errorf("delete source %s: %s", p, r)
+				}
+			}(src)
+		}
+		wg.Wait()
+	}
+	return r
 }
 
 //export jfs_lseek
 func jfs_lseek(pid, fd int, offset int64, whence int) int64 {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if ok {
 		filesLock.Unlock()
 		off, _ := f.Seek(f.w.withPid(pid), offset, whence)
-		return int64(off)
+		return off
 	}
 	filesLock.Unlock()
 	return int64(EINVAL)
@@ -978,7 +1081,7 @@ func jfs_lseek(pid, fd int, offset int64, whence int) int64 {
 //export jfs_read
 func jfs_read(pid, fd int, cbuf uintptr, count int) int {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if !ok {
 		filesLock.Unlock()
 		return EINVAL
@@ -990,13 +1093,13 @@ func jfs_read(pid, fd int, cbuf uintptr, count int) int {
 		logger.Errorf("read %s: %s", f.Name(), err)
 		return errno(err)
 	}
-	return int(n)
+	return n
 }
 
 //export jfs_pread
 func jfs_pread(pid, fd int, cbuf uintptr, count C.size_t, offset C.off_t) int {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if !ok {
 		filesLock.Unlock()
 		return EINVAL
@@ -1011,32 +1114,32 @@ func jfs_pread(pid, fd int, cbuf uintptr, count C.size_t, offset C.off_t) int {
 		logger.Errorf("read %s: %s", f.Name(), err)
 		return errno(err)
 	}
-	return int(n)
+	return n
 }
 
 //export jfs_write
 func jfs_write(pid, fd int, cbuf uintptr, count C.size_t) int {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if !ok {
 		filesLock.Unlock()
 		return EINVAL
 	}
 	filesLock.Unlock()
 
-	buf := toBuf(uintptr(cbuf), int(count))
+	buf := toBuf(cbuf, int(count))
 	n, err := f.Write(f.w.withPid(pid), buf)
 	if err != 0 {
 		logger.Errorf("write %s: %s", f.Name(), err)
 		return errno(err)
 	}
-	return int(n)
+	return n
 }
 
 //export jfs_flush
 func jfs_flush(pid, fd int) int {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if !ok {
 		filesLock.Unlock()
 		return EINVAL
@@ -1049,7 +1152,7 @@ func jfs_flush(pid, fd int) int {
 //export jfs_fsync
 func jfs_fsync(pid, fd int) int {
 	filesLock.Lock()
-	f, ok := openFiles[int(fd)]
+	f, ok := openFiles[fd]
 	if !ok {
 		filesLock.Unlock()
 		return EINVAL

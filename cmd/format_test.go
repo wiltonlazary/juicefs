@@ -1,21 +1,28 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/juicedata/juicefs/pkg/meta"
+)
 
 func TestFixObjectSize(t *testing.T) {
 	t.Run("Should make sure the size is in range", func(t *testing.T) {
@@ -47,4 +54,35 @@ func TestFixObjectSize(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestFormat(t *testing.T) {
+	rdb := resetTestMeta()
+	if err := Main([]string{"", "format", "--bucket", t.TempDir(), testMeta, testVolume}); err != nil {
+		t.Fatalf("format error: %s", err)
+	}
+	body, err := rdb.Get(context.Background(), "setting").Bytes()
+	if err != nil {
+		t.Fatalf("get setting: %s", err)
+	}
+	f := meta.Format{}
+	if err = json.Unmarshal(body, &f); err != nil {
+		t.Fatalf("json unmarshal: %s", err)
+	}
+	if f.Name != testVolume {
+		t.Fatalf("volume name %s != expected %s", f.Name, testVolume)
+	}
+
+	if err = Main([]string{"", "format", testMeta, testVolume, "--capacity", "1", "--inodes", "1000"}); err != nil {
+		t.Fatalf("format error: %s", err)
+	}
+	if body, err = rdb.Get(context.Background(), "setting").Bytes(); err != nil {
+		t.Fatalf("get setting: %s", err)
+	}
+	if err = json.Unmarshal(body, &f); err != nil {
+		t.Fatalf("json unmarshal: %s", err)
+	}
+	if f.Capacity != 1<<30 || f.Inodes != 1000 {
+		t.Fatalf("unexpected volume: %+v", f)
+	}
 }

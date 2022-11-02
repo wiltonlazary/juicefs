@@ -1,0 +1,129 @@
+name: "ltp-syscalls"
+
+on:
+  push:
+    branches:
+      - 'release-**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    #The branches below must be a subset of the branches above
+    branches:
+      - 'release-**'
+    paths-ignore:
+      - 'docs/**'
+  schedule:
+    - cron:  '30 20 * * *'
+  workflow_dispatch:
+
+jobs:
+  ltpsyscalls:
+    strategy:
+      fail-fast: false
+      matrix:
+        # meta: [ 'sqlite3', 'redis', 'mysql', 'tikv', 'tidb', 'postgres', 'mariadb', 'badger', 'fdb']
+        meta: ['redis']
+        type: [ 'head', 'middle', 'tail']
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+
+      - name: Set Variable
+        id: vars
+        run: |
+          if [ "${{matrix.meta}}" == "fdb" ]; then
+            echo ::set-output name=target::"juicefs.fdb"
+          else
+            echo ::set-output name=target::"juicefs"
+          fi
+
+      - name: Build
+        uses: ./.github/actions/build
+        with: 
+          target: ${{steps.vars.outputs.target}}
+
+      - uses: actions/cache@v3
+        if: ${{ matrix.meta == 'tikv' || matrix.meta == 'tidb' }}
+        with:
+          path: ~/.tiup
+          key: ${{ runner.os }}-tiup
+          restore-keys: |
+            ${{ runner.os }}-tiup
+
+      - name: Prepare meta db
+        run: | 
+          chmod +x .github/scripts/start_meta_engine.sh
+          source .github/scripts/start_meta_engine.sh
+          start_meta_engine ${{matrix.meta}}
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          create_database $meta_url
+
+      - name: Copy
+        run: |
+          cp .github/workflows/bash/rm_syscalls /tmp/
+          cp .github/workflows/bash/rm_list.sh /tmp/
+
+      - name: Juicefs Format
+        run: |
+          source .github/scripts/start_meta_engine.sh
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          sudo ./juicefs format --trash-days 0 $meta_url pics
+
+      - name: Juicefs Mount
+        run: |
+          source .github/scripts/start_meta_engine.sh
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          sudo ./juicefs mount --enable-xattr -d $meta_url /tmp/jfs --no-usage-report &
+
+      - name: Install LTP Syscalls
+        run: |
+          wget -O ltp.tar.gz https://github.com/linux-test-project/ltp/archive/refs/tags/20210927.tar.gz
+          mkdir ltp
+          tar -xvf ltp.tar.gz -C ltp --strip-components 1
+          cd ltp
+          make autotools
+          ./configure
+          make
+          sudo make install
+
+      - name: Run LTP Syscalls
+        timeout-minutes: 60
+        run: |
+          cd /opt/ltp
+          sudo chmod +x /tmp/rm_list.sh
+          sudo chmod 777 runtest/syscalls
+          echo "chdir01 chdir01" >>/tmp/rm_syscalls
+          echo "setxattr01 setxattr01" >>/tmp/rm_syscalls
+          cat /tmp/rm_syscalls
+          sudo /tmp/rm_list.sh /tmp/rm_syscalls /opt/ltp/runtest/syscalls
+          if [ "${{matrix.type}}" == "head" ]; then
+            sudo head -n 600 runtest/syscalls > runtest/syscalls2
+          elif [ "${{matrix.type}}" == "middle" ]; then
+            sudo head -n 1300 runtest/syscalls > runtest/syscallstmp
+            sudo tail -n 700  runtest/syscallstmp > runtest/syscalls2
+          elif [ "${{matrix.type}}" == "tail" ]; then
+            sudo tail -n 500 runtest/syscalls > runtest/syscalls2
+          else
+            echo "matrix.type: ${{matrix.type}} is not valid" && exit 1
+          fi
+          sudo chmod 777 runtest/syscalls2
+          sudo ./runltp -d /tmp/jfs -f syscalls2 -C result.log.failed -T result.log.tconf -l result.log  &
+          wait $!
+
+      - name: Log
+        if: ${{ always() }}
+        run: |
+          sudo tail -n 100 /opt/ltp/output/result.log.failed
+          tail -300 /var/log/juicefs.log
+          grep "<FATAL>:" /var/log/juicefs.log && exit 1 || true
+      
+      - name: Send Slack Notification
+        if: ${{ failure() }}
+        uses: juicedata/slack-notify-action@main
+        with:
+          channel-id: "${{ secrets.SLACK_CHANNEL_ID_FOR_PR_CHECK_NOTIFY }}"
+          slack_bot_token: "${{ secrets.SLACK_BOT_TOKEN }}"  

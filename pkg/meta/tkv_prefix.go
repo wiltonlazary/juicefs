@@ -1,19 +1,22 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
+
+import "fmt"
 
 type prefixTxn struct {
 	kvTxn
@@ -21,7 +24,10 @@ type prefixTxn struct {
 }
 
 func (tx *prefixTxn) realKey(key []byte) []byte {
-	return append(tx.prefix, key...)
+	k := make([]byte, len(tx.prefix)+len(key))
+	copy(k, tx.prefix)
+	copy(k[len(tx.prefix):], key)
+	return k
 }
 
 func (tx *prefixTxn) origKey(key []byte) []byte {
@@ -56,8 +62,8 @@ func (tx *prefixTxn) scanKeys(prefix []byte) [][]byte {
 	return keys
 }
 
-func (tx *prefixTxn) scanValues(prefix []byte, filter func(k, v []byte) bool) map[string][]byte {
-	r := tx.kvTxn.scanValues(tx.realKey(prefix), func(k, v []byte) bool {
+func (tx *prefixTxn) scanValues(prefix []byte, limit int, filter func(k, v []byte) bool) map[string][]byte {
+	r := tx.kvTxn.scanValues(tx.realKey(prefix), limit, func(k, v []byte) bool {
 		if filter == nil {
 			return true
 		}
@@ -102,6 +108,22 @@ func (c *prefixClient) txn(f func(kvTxn) error) error {
 	return c.tkvClient.txn(func(tx kvTxn) error {
 		return f(&prefixTxn{tx, c.prefix})
 	})
+}
+
+func (c *prefixClient) scan(prefix []byte, handler func(key, value []byte)) error {
+	k := make([]byte, len(c.prefix)+len(prefix))
+	copy(k, c.prefix)
+	copy(k[len(c.prefix):], prefix)
+	return c.tkvClient.scan(k, func(key, value []byte) {
+		handler(key[len(c.prefix):], value)
+	})
+}
+
+func (c *prefixClient) reset(prefix []byte) error {
+	if prefix != nil {
+		return fmt.Errorf("prefix must be nil, but got %v", prefix)
+	}
+	return c.tkvClient.reset(c.prefix)
 }
 
 func withPrefix(client tkvClient, prefix []byte) tkvClient {

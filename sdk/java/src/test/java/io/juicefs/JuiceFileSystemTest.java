@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * 
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package io.juicefs;
@@ -20,11 +21,15 @@ import org.apache.commons.io.IOUtils;
 import org.apache.flink.runtime.fs.hdfs.HadoopRecoverableWriter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.*;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.MD5Hash;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
@@ -32,6 +37,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_CHECKPOINT_INTERVAL_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_KEY;
 import static org.junit.Assert.assertArrayEquals;
 
 public class JuiceFileSystemTest extends TestCase {
@@ -42,9 +49,9 @@ public class JuiceFileSystemTest extends TestCase {
   public void setUp() throws Exception {
     cfg = new Configuration();
     cfg.addResource(JuiceFileSystemTest.class.getClassLoader().getResourceAsStream("core-site.xml"));
-    Thread.currentThread().interrupt();
-    fs = FileSystem.get(cfg);
-    Thread.interrupted();
+    cfg.set(FS_TRASH_INTERVAL_KEY, "6");
+    cfg.set(FS_TRASH_CHECKPOINT_INTERVAL_KEY, "2");
+    fs = FileSystem.newInstance(cfg);
     fs.delete(new Path("/hello"));
     FSDataOutputStream out = fs.create(new Path("/hello"), true);
     out.writeBytes("hello\n");
@@ -128,6 +135,32 @@ public class JuiceFileSystemTest extends TestCase {
     }
   }
 
+  public void testWrite() throws Exception {
+    Path f = new Path("/testWriteFile");
+    FSDataOutputStream fou = fs.create(f);
+    byte[] b = "hello world".getBytes();
+    OutputStream ou = ((JuiceFileSystemImpl.BufferedFSOutputStream)fou.getWrappedStream()).getOutputStream();
+    ou.write(b, 6, 5);
+    ou.close();
+    FSDataInputStream in = fs.open(f);
+    String str = IOUtils.toString(in);
+    assertEquals("world", str);
+  }
+
+  public void testReadSkip() throws Exception {
+    Path p = new Path("/test_readskip");
+    fs.create(p).close();
+    String content = "12345";
+    writeFile(fs, p, content);
+    FSDataInputStream in = fs.open(p);
+    long skip = in.skip(2);
+    assertEquals(2, skip);
+
+    byte[] bytes = new byte[content.length() - (int)skip];
+    in.readFully(bytes);
+    assertEquals("345", new String(bytes));
+  }
+
   public void testReadAfterClose() throws Exception {
     byte[] buf = new byte[6];
     FSDataInputStream in = fs.open(new Path("/hello"));
@@ -155,6 +188,8 @@ public class JuiceFileSystemTest extends TestCase {
     }
     assertEquals(5001, fs.listStatus(new Path("/mkdirs/")).length);
     assertTrue(fs.delete(new Path("/mkdirs"), true));
+    assertTrue(fs.mkdirs(new Path("parent/dir")));
+    assertTrue(fs.exists(new Path(fs.getHomeDirectory(), "parent")));
   }
 
   public void testCreateWithoutPermission() throws Exception {
@@ -173,6 +208,45 @@ public class JuiceFileSystemTest extends TestCase {
       throw new Exception("create should fail");
     } catch (IOException e) {
     }
+  }
+
+  public void testCreateNonRecursive() throws Exception {
+    Path p = new Path("/NOT_EXIST_DIR");
+    p = new Path(p, "file");
+    try (FSDataOutputStream ou = fs.createNonRecursive(p, false, 1 << 20, (short) 1, 128 << 20, null);) {
+      fail("createNonRecursive in a not exit dir should fail");
+    } catch (IOException ignored) {
+    }
+  }
+
+  public void testTruncate() throws Exception {
+    Path p = new Path("/test_truncate");
+    fs.create(p).close();
+    fs.truncate(p, 1 << 20);
+    assertEquals(1 << 20, fs.getFileStatus(p).getLen());
+    fs.truncate(p, 1 << 10);
+    assertEquals(1 << 10, fs.getFileStatus(p).getLen());
+  }
+
+  public void testAccess() throws Exception {
+    Path p1 = new Path("/test_access");
+    FileSystem newFs = createNewFs(cfg, "user1", new String[]{"group1"});
+    newFs.create(p1).close();
+    newFs.setPermission(p1, new FsPermission((short) 0444));
+    newFs.access(p1, FsAction.READ);
+    try {
+      newFs.access(p1, FsAction.WRITE);
+      fail("The access call should have failed.");
+    } catch (AccessControlException e) {
+    }
+
+    Path badPath = new Path("/bad/bad");
+    try {
+      newFs.access(badPath, FsAction.READ);
+      fail("The access call should have failed");
+    } catch (FileNotFoundException e) {
+    }
+    newFs.close();
   }
 
   public void testSetPermission() throws Exception {
@@ -290,6 +364,21 @@ public class JuiceFileSystemTest extends TestCase {
         throw new IOException("Reached the end of stream. Still have: " + buf.remaining() + " bytes left");
       }
     }
+
+    Path directReadFile = new Path("/direct_file");
+    FSDataOutputStream ou = fs.create(directReadFile);
+    ou.write("hello world".getBytes());
+    ou.close();
+    FSDataInputStream dto = fs.open(directReadFile);
+    ByteBuffer directBuf = ByteBuffer.allocateDirect(11);
+    directBuf.put("hello ".getBytes());
+    dto.seek(6);
+    dto.read(directBuf);
+    byte[] rest = new byte[11];
+    directBuf.flip();
+    directBuf.get(rest, 0, rest.length);
+    assertEquals("hello world", new String(rest));
+
     /*
      * FSDataOutputStream out = fs.create(new Path("/bigfile"), true); byte[] arr =
      * new byte[1<<20]; for (int i=0; i<1024; i++) { out.write(arr); } out.close();
@@ -348,6 +437,10 @@ public class JuiceFileSystemTest extends TestCase {
     in.read(3000, new byte[6000], 0, 3000);
     assertEquals(readSize * 2 + 3000 + 3000, statistics.getBytesRead());
 
+    in.read(new byte[3000], 0, 3000);
+    assertEquals(readSize * 2 + 3000 + 3000 + 3000, statistics.getBytesRead());
+
+    in.close();
   }
 
   public void testChecksum() throws IOException {
@@ -366,6 +459,16 @@ public class JuiceFileSystemTest extends TestCase {
             sum);
     sum = fs.getFileChecksum(f, 5);
     assertEquals(new MD5MD5CRC32CastagnoliFileChecksum(512, 0, new MD5Hash("05a157db1cc7549c82ec6f31f63fdb46")),
+            sum);
+
+    f = new Path("/medium");
+    out = fs.create(f, true);
+    byte[] bytes = new byte[(128 << 20) - 1];
+    out.write(bytes);
+    out.close();
+    sum = fs.getFileChecksum(f);
+    assertEquals(
+            new MD5MD5CRC32CastagnoliFileChecksum(512, 0, new MD5Hash("1cf326bae8274fd824ec69ece3e4082f")),
             sum);
 
     f = new Path("/big");
@@ -427,7 +530,7 @@ public class JuiceFileSystemTest extends TestCase {
   }
 
   public void testConcat() throws Exception {
-    Path trg = new Path("/concat");
+    Path trg = new Path("/tmp/concat");
     Path src1 = new Path("/tmp/concat1");
     Path src2 = new Path("/tmp/concat2");
     FSDataOutputStream ou = fs.create(trg);
@@ -439,13 +542,24 @@ public class JuiceFileSystemTest extends TestCase {
     FSDataOutputStream sou2 = fs.create(src2);
     sou2.write("hello".getBytes());
     sou2.close();
-    fs.concat(trg, new Path[]{src1, src2} );
+    fs.concat(trg, new Path[]{src1, src2});
     FSDataInputStream in = fs.open(trg);
     assertEquals("hellohellohello", IOUtils.toString(in));
     in.close();
     // src should be deleted after concat
     assertFalse(fs.exists(src1));
     assertFalse(fs.exists(src2));
+
+    Path emptyFile = new Path("/tmp/concat_empty_file");
+    Path src = new Path("/tmp/concat_empty_file_src");
+    FSDataOutputStream srcOu = fs.create(src);
+    srcOu.write("hello".getBytes());
+    srcOu.close();
+    fs.create(emptyFile).close();
+    fs.concat(emptyFile, new Path[]{src});
+    in = fs.open(emptyFile);
+    assertEquals("hello", IOUtils.toString(in));
+    in.close();
   }
 
   public void testList() throws Exception {
@@ -467,5 +581,148 @@ public class JuiceFileSystemTest extends TestCase {
     }
     Arrays.sort(org);
     assertArrayEquals(org, res);
+  }
+
+  private void writeFile(FileSystem fs, Path p, String content) throws IOException {
+    FSDataOutputStream ou = fs.create(p);
+    ou.write(content.getBytes());
+    ou.close();
+  }
+
+  public FileSystem createNewFs(Configuration conf, String user, String[] group) throws IOException, InterruptedException {
+    if (user != null && group != null) {
+      UserGroupInformation root = UserGroupInformation.createUserForTesting(user, group);
+      return root.doAs((PrivilegedExceptionAction<FileSystem>) () -> FileSystem.newInstance(FileSystem.getDefaultUri(conf), conf));
+    }
+    return FileSystem.newInstance(FileSystem.getDefaultUri(conf), conf);
+  }
+
+  public void testUsersAndGroups() throws Exception {
+    Path users1 = new Path("/tmp/users1");
+    Path groups1 = new Path("/tmp/groups1");
+    Path users2 = new Path("/tmp/users2");
+    Path groups2 = new Path("/tmp/groups2");
+
+    writeFile(fs, users1, "user1:2001\n");
+    writeFile(fs, groups1, "group1:3001:user1\n");
+    writeFile(fs, users2, "user2:2001\n");
+    writeFile(fs, groups2, "group2:3001:user2\n");
+
+    Configuration conf = new Configuration(cfg);
+    conf.set("juicefs.users", users1.toUri().getPath());
+    conf.set("juicefs.groups", groups1.toUri().getPath());
+    conf.set("juicefs.superuser", UserGroupInformation.getCurrentUser().getShortUserName());
+
+    FileSystem newFs = createNewFs(conf, null, null);
+    Path p = new Path("/test_user_group_file");
+    newFs.create(p).close();
+    newFs.setOwner(p, "user1", "group1");
+    newFs.close();
+
+    conf.set("juicefs.users", users2.toUri().getPath());
+    conf.set("juicefs.groups", groups2.toUri().getPath());
+    newFs = createNewFs(conf, null, null);
+    FileStatus fileStatus = newFs.getFileStatus(p);
+    assertEquals("user2", fileStatus.getOwner());
+    assertEquals("group2", fileStatus.getGroup());
+    newFs.close();
+  }
+
+  public void testGroupPerm() throws Exception {
+    Path testPath = new Path("/test_group_perm");
+
+    Configuration conf = new Configuration(cfg);
+    conf.set("juicefs.supergroup", "hadoop");
+    conf.set("juicefs.superuser", "hadoop");
+    FileSystem uer1Fs = createNewFs(conf, "user1", new String[]{"hadoop"});
+    uer1Fs.delete(testPath, true);
+    uer1Fs.mkdirs(testPath);
+    uer1Fs.setPermission(testPath, FsPermission.createImmutable((short) 0775));
+    uer1Fs.close();
+
+    FileSystem uer2Fs = createNewFs(conf, "user2", new String[]{"hadoop"});
+    Path f = new Path(testPath, "test_file");
+    uer2Fs.create(f).close();
+    FileStatus fileStatus = uer2Fs.getFileStatus(f);
+    assertEquals("user2", fileStatus.getOwner());
+    uer2Fs.close();
+  }
+
+  public void testUmask() throws Exception {
+    Configuration conf = new Configuration(cfg);
+    conf.set("juicefs.umask", "077");
+    UserGroupInformation currentUser = UserGroupInformation.getCurrentUser();
+    FileSystem newFs = createNewFs(conf, currentUser.getShortUserName(), currentUser.getGroupNames());
+    newFs.delete(new Path("/test_umask"), true);
+    newFs.mkdirs(new Path("/test_umask/dir"));
+    newFs.create(new Path("/test_umask/dir/f")).close();
+    assertEquals(FsPermission.createImmutable((short) 0700), newFs.getFileStatus(new Path("/test_umask")).getPermission());
+    assertEquals(FsPermission.createImmutable((short) 0700), newFs.getFileStatus(new Path("/test_umask/dir")).getPermission());
+    assertEquals(FsPermission.createImmutable((short) 0600), newFs.getFileStatus(new Path("/test_umask/dir/f")).getPermission());
+    newFs.close();
+
+    conf.set("juicefs.umask", "000");
+    newFs = createNewFs(conf, currentUser.getShortUserName(), currentUser.getGroupNames());
+    newFs.delete(new Path("/test_umask"), true);
+    newFs.mkdirs(new Path("/test_umask/dir"));
+    newFs.create(new Path("/test_umask/dir/f")).close();
+    assertEquals(FsPermission.createImmutable((short) 0777), newFs.getFileStatus(new Path("/test_umask")).getPermission());
+    assertEquals(FsPermission.createImmutable((short) 0777), newFs.getFileStatus(new Path("/test_umask/dir")).getPermission());
+    assertEquals(FsPermission.createImmutable((short) 0666), newFs.getFileStatus(new Path("/test_umask/dir/f")).getPermission());
+
+    conf.set("juicefs.umask", "022");
+    conf.set("fs.permissions.umask-mode", "077");
+    Path p = new Path("/test_umask/u_parent/f");
+    newFs = createNewFs(conf, currentUser.getShortUserName(), currentUser.getGroupNames());
+    newFs.delete(p.getParent());
+    FSDataOutputStream out = newFs.create(p, true);
+    out.close();
+    assertEquals(FsPermission.createImmutable((short) 0755), fs.getFileStatus(p.getParent()).getPermission());
+    assertEquals(FsPermission.createImmutable((short) 0644), fs.getFileStatus(p).getPermission());
+
+    newFs.close();
+  }
+
+  public void testGuidMapping() throws Exception {
+    Configuration newConf = new Configuration(cfg);
+
+    FSDataOutputStream ou = fs.create(new Path("/etc/users"));
+    ou.write("foo:10000\n".getBytes());
+    ou.close();
+    newConf.set("juicefs.users", "/etc/users");
+
+    FileSystem fooFs = createNewFs(newConf, "foo", new String[]{"nogrp"});
+    Path f = new Path("/test_foo");
+    fooFs.create(f).close();
+    assertEquals("foo", fooFs.getFileStatus(f).getOwner());
+
+    ou = fs.create(new Path("/etc/users"));
+    ou.write("foo:10001\n".getBytes());
+    ou.close();
+    FileSystem newFS = FileSystem.newInstance(newConf);
+    assertEquals("10000", fooFs.getFileStatus(f).getOwner());
+
+    fooFs.delete(f, false);
+  }
+
+  public void testTrash() throws Exception {
+    Trash trash = new Trash(fs, cfg);
+    Path trashFile = new Path("/tmp/trashfile");
+    trash.expungeImmediately();
+    fs.create(trashFile).close();
+    Trash.moveToAppropriateTrash(fs, trashFile, cfg);
+    trash.checkpoint();
+    fs.create(trashFile).close();
+    Trash.moveToAppropriateTrash(fs, trashFile, cfg);
+    assertEquals(2, fs.listStatus(fs.getTrashRoot(trashFile)).length);
+    trash.expungeImmediately();
+    assertEquals(0, fs.listStatus(fs.getTrashRoot(trashFile)).length);
+  }
+
+  public void testBlockSize() throws Exception {
+    Configuration newConf = new Configuration(cfg);
+    newConf.set("dfs.blocksize", "256m");
+    FileSystem newFs = FileSystem.newInstance(newConf);
+    assertEquals(256 << 20, newFs.getDefaultBlockSize(new Path("/")));
   }
 }

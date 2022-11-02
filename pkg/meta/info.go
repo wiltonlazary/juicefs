@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
@@ -26,7 +27,7 @@ type redisVersion struct {
 	major, minor int
 }
 
-var oldestSupportedVer = redisVersion{"2.2.x", 2, 2}
+var oldestSupportedVer = redisVersion{"4.0.x", 4, 0}
 
 func parseRedisVersion(v string) (ver redisVersion, err error) {
 	parts := strings.Split(v, ".")
@@ -59,7 +60,6 @@ func (ver redisVersion) String() string {
 
 type redisInfo struct {
 	aofEnabled      bool
-	clusterEnabled  bool
 	maxMemoryPolicy string
 	redisVersion    string
 }
@@ -82,15 +82,10 @@ func checkRedisInfo(rawInfo string) (info redisInfo, err error) {
 			if val == "0" {
 				logger.Warnf("AOF is not enabled, you may lose data if Redis is not shutdown properly.")
 			}
-		case "cluster_enabled":
-			info.clusterEnabled = val == "1"
-			if val != "0" {
-				logger.Warnf("Redis cluster is not supported, some operation may fail unexpected.")
-			}
 		case "maxmemory_policy":
 			info.maxMemoryPolicy = val
 			if val != "noeviction" {
-				logger.Warnf("maxmemory_policy is %q, please set it to 'noeviction'.", val)
+				logger.Warnf("maxmemory_policy is %q,  we will try to reconfigure it to 'noeviction'.", val)
 			}
 		case "redis_version":
 			info.redisVersion = val
@@ -99,7 +94,7 @@ func checkRedisInfo(rawInfo string) (info redisInfo, err error) {
 				logger.Warnf("Failed to parse Redis server version %q: %s", ver, err)
 			} else {
 				if ver.olderThan(oldestSupportedVer) {
-					logger.Warnf("Redis version should not be older than %s", oldestSupportedVer)
+					logger.Fatalf("Redis version should not be older than %s", oldestSupportedVer)
 				}
 			}
 		}

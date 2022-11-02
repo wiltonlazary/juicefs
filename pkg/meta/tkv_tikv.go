@@ -1,43 +1,80 @@
+//go:build !notikv
+// +build !notikv
+
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
 
 import (
 	"context"
-	"fmt"
+	"net/url"
 	"strings"
 
+	plog "github.com/pingcap/log"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"github.com/tikv/client-go/v2/config"
 	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/tikv"
+	"github.com/tikv/client-go/v2/txnkv"
+	"github.com/tikv/client-go/v2/txnkv/txnutil"
 )
 
 func init() {
 	Register("tikv", newKVMeta)
+	drivers["tikv"] = newTikvClient
+
 }
 
-func newTkvClient(driver, addr string) (tkvClient, error) {
-	if driver == "memkv" {
-		return newMockClient()
+func newTikvClient(addr string) (tkvClient, error) {
+	var plvl string // TiKV (PingCap) uses uber-zap logging, make it less verbose
+	switch logger.Level {
+	case logrus.TraceLevel:
+		plvl = "debug"
+	case logrus.DebugLevel:
+		plvl = "info"
+	case logrus.InfoLevel, logrus.WarnLevel:
+		plvl = "warn"
+	case logrus.ErrorLevel:
+		plvl = "error"
+	default:
+		plvl = "dpanic"
 	}
-	if driver != "tikv" {
-		return nil, fmt.Errorf("invalid driver %s != expected %s", driver, "tikv")
+	l, prop, _ := plog.InitLogger(&plog.Config{Level: plvl})
+	plog.ReplaceGlobals(l, prop)
+
+	tUrl, err := url.Parse("tikv://" + addr)
+	if err != nil {
+		return nil, err
 	}
-	pds := strings.Split(addr, ",")
-	client, err := tikv.NewTxnClient(pds)
-	return &tikvClient{client}, err
+	config.UpdateGlobal(func(conf *config.Config) {
+		q := tUrl.Query()
+		conf.Security = config.NewSecurity(
+			q.Get("ca"),
+			q.Get("cert"),
+			q.Get("key"),
+			strings.Split(q.Get("verify-cn"), ","))
+	})
+	client, err := txnkv.NewClient(strings.Split(tUrl.Host, ","))
+	if err != nil {
+		return nil, err
+	}
+	prefix := strings.TrimLeft(tUrl.Path, "/")
+	return withPrefix(&tikvClient{client.KVStore}, append([]byte(prefix), 0xFD)), nil
 }
 
 type tikvTxn struct {
@@ -67,7 +104,11 @@ func (tx *tikvTxn) gets(keys ...[]byte) [][]byte {
 	return values
 }
 
-func (tx *tikvTxn) scanRange0(begin, end []byte, filter func(k, v []byte) bool) map[string][]byte {
+func (tx *tikvTxn) scanRange0(begin, end []byte, limit int, filter func(k, v []byte) bool) map[string][]byte {
+	if limit == 0 {
+		return nil
+	}
+
 	it, err := tx.Iter(begin, end)
 	if err != nil {
 		panic(err)
@@ -79,6 +120,11 @@ func (tx *tikvTxn) scanRange0(begin, end []byte, filter func(k, v []byte) bool) 
 		value := it.Value()
 		if filter == nil || filter(key, value) {
 			ret[string(key)] = value
+			if limit > 0 {
+				if limit--; limit == 0 {
+					break
+				}
+			}
 		}
 		if err = it.Next(); err != nil {
 			panic(err)
@@ -88,31 +134,11 @@ func (tx *tikvTxn) scanRange0(begin, end []byte, filter func(k, v []byte) bool) 
 }
 
 func (tx *tikvTxn) scanRange(begin, end []byte) map[string][]byte {
-	return tx.scanRange0(begin, end, nil)
-}
-
-func (tx *tikvTxn) nextKey(key []byte) []byte {
-	if len(key) == 0 {
-		return nil
-	}
-	next := make([]byte, len(key))
-	copy(next, key)
-	p := len(next) - 1
-	for {
-		next[p]++
-		if next[p] != 0 {
-			break
-		}
-		p--
-		if p < 0 {
-			panic("can't scan keys for 0xFF")
-		}
-	}
-	return next
+	return tx.scanRange0(begin, end, -1, nil)
 }
 
 func (tx *tikvTxn) scanKeys(prefix []byte) [][]byte {
-	it, err := tx.Iter(prefix, tx.nextKey(prefix))
+	it, err := tx.Iter(prefix, nextKey(prefix))
 	if err != nil {
 		panic(err)
 	}
@@ -127,12 +153,12 @@ func (tx *tikvTxn) scanKeys(prefix []byte) [][]byte {
 	return ret
 }
 
-func (tx *tikvTxn) scanValues(prefix []byte, filter func(k, v []byte) bool) map[string][]byte {
-	return tx.scanRange0(prefix, tx.nextKey(prefix), filter)
+func (tx *tikvTxn) scanValues(prefix []byte, limit int, filter func(k, v []byte) bool) map[string][]byte {
+	return tx.scanRange0(prefix, nextKey(prefix), limit, filter)
 }
 
 func (tx *tikvTxn) exist(prefix []byte) bool {
-	it, err := tx.Iter(prefix, tx.nextKey(prefix))
+	it, err := tx.Iter(prefix, nextKey(prefix))
 	if err != nil {
 		panic(err)
 	}
@@ -153,11 +179,8 @@ func (tx *tikvTxn) append(key []byte, value []byte) []byte {
 }
 
 func (tx *tikvTxn) incrBy(key []byte, value int64) int64 {
-	var new int64
 	buf := tx.get(key)
-	if len(buf) > 0 {
-		new = parseCounter(buf)
-	}
+	new := parseCounter(buf)
 	if value != 0 {
 		new += value
 		tx.set(key, packCounter(new))
@@ -181,21 +204,25 @@ func (c *tikvClient) name() string {
 	return "tikv"
 }
 
-func (c *tikvClient) txn(f func(kvTxn) error) error {
+func (c *tikvClient) shouldRetry(err error) bool {
+	return strings.Contains(err.Error(), "write conflict") || strings.Contains(err.Error(), "TxnLockNotFound")
+}
+
+func (c *tikvClient) txn(f func(kvTxn) error) (err error) {
 	tx, err := c.client.Begin()
 	if err != nil {
 		return err
 	}
-	defer func(e *error) {
+	defer func() {
 		if r := recover(); r != nil {
 			fe, ok := r.(error)
 			if ok {
-				*e = fe
+				err = fe
 			} else {
-				panic(r)
+				err = errors.Errorf("tikv client txn func error: %v", r)
 			}
 		}
-	}(&err)
+	}()
 	if err = f(&tikvTxn{tx}); err != nil {
 		return err
 	}
@@ -205,4 +232,36 @@ func (c *tikvClient) txn(f func(kvTxn) error) error {
 		err = tx.Commit(context.Background())
 	}
 	return err
+}
+
+func (c *tikvClient) scan(prefix []byte, handler func(key, value []byte)) error {
+	ts, err := c.client.CurrentTimestamp("global")
+	if err != nil {
+		return err
+	}
+	snap := c.client.GetSnapshot(ts)
+	snap.SetScanBatchSize(10240)
+	snap.SetNotFillCache(true)
+	snap.SetPriority(txnutil.PriorityLow)
+	it, err := snap.Iter(prefix, nextKey(prefix))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	for it.Valid() {
+		handler(it.Key(), it.Value())
+		if err = it.Next(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *tikvClient) reset(prefix []byte) error {
+	_, err := c.client.DeleteRange(context.Background(), prefix, nextKey(prefix), 1)
+	return err
+}
+
+func (c *tikvClient) close() error {
+	return c.client.Close()
 }

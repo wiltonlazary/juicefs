@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package vfs
@@ -36,7 +37,7 @@ var (
 func readSlice(store chunk.ChunkStore, s *meta.Slice, page *chunk.Page, off int) error {
 	buf := page.Data
 	read := 0
-	reader := store.NewReader(s.Chunkid, int(s.Size))
+	reader := store.NewReader(s.Id, int(s.Size))
 	for read < len(buf) {
 		p := page.Slice(read, len(buf)-read)
 		n, err := reader.ReadAt(context.Background(), p, off+int(s.Off))
@@ -50,7 +51,7 @@ func readSlice(store chunk.ChunkStore, s *meta.Slice, page *chunk.Page, off int)
 	return nil
 }
 
-func Compact(conf chunk.Config, store chunk.ChunkStore, slices []meta.Slice, chunkid uint64) error {
+func Compact(conf chunk.Config, store chunk.ChunkStore, slices []meta.Slice, id uint64) error {
 	for utils.AllocMemory()-store.UsedMemory() > int64(conf.BufferSize)*3/2 {
 		time.Sleep(time.Millisecond * 100)
 	}
@@ -59,13 +60,13 @@ func Compact(conf chunk.Config, store chunk.ChunkStore, slices []meta.Slice, chu
 		size += s.Len
 	}
 	compactSizeHistogram.Observe(float64(size))
-	logger.Debugf("compact %d slices (%d bytes) to chunk %d", len(slices), size, chunkid)
+	logger.Debugf("compact %d slices (%d bytes) to new slice %d", len(slices), size, id)
 
-	writer := store.NewWriter(chunkid)
+	writer := store.NewWriter(id)
 
 	var pos int
 	for i, s := range slices {
-		if s.Chunkid == 0 {
+		if s.Id == 0 {
 			_, err := writer.WriteAt(make([]byte, int(s.Len)), int64(pos))
 			if err != nil {
 				writer.Abort()
@@ -78,8 +79,8 @@ func Compact(conf chunk.Config, store chunk.ChunkStore, slices []meta.Slice, chu
 		for read < int(s.Len) {
 			l := utils.Min(conf.BlockSize, int(s.Len)-read)
 			p := chunk.NewOffPage(l)
-			if err := readSlice(store, &s, p, read); err != nil {
-				logger.Debugf("can't compact chunk %d, retry later, read %d: %s", chunkid, i, err)
+			if err := readSlice(store, &slices[i], p, read); err != nil {
+				logger.Debugf("can't compact to slice %d, retry later, read %d: %s", id, i, err)
 				p.Release()
 				writer.Abort()
 				return err
@@ -87,7 +88,7 @@ func Compact(conf chunk.Config, store chunk.ChunkStore, slices []meta.Slice, chu
 			_, err := writer.WriteAt(p.Data, int64(pos+read))
 			p.Release()
 			if err != nil {
-				logger.Errorf("can't compact chunk %d, retry later, write: %s", chunkid, err)
+				logger.Errorf("can't compact to slice %d, retry later, write: %s", id, err)
 				writer.Abort()
 				return err
 			}

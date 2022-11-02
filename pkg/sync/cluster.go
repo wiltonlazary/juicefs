@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package sync
@@ -29,7 +30,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/object"
@@ -37,17 +37,22 @@ import (
 
 // Stat has the counters to represent the progress.
 type Stat struct {
-	Copied      int64 // the number of copied files
-	CopiedBytes int64 // total amount of copied data in bytes
-	Failed      int64 // the number of files that fail to copy
-	Deleted     int64 // the number of deleted files
+	Copied       int64 // the number of copied files
+	CopiedBytes  int64 // total amount of copied data in bytes
+	CheckedBytes int64 // total amount of checked data in bytes
+	Deleted      int64 // the number of deleted files
+	Skipped      int64 // the number of files skipped
+	Failed       int64 // the number of files that fail to copy
 }
 
 func updateStats(r *Stat) {
-	atomic.AddInt64(&copied, r.Copied)
-	atomic.AddInt64(&copiedBytes, r.CopiedBytes)
-	atomic.AddInt64(&failed, r.Failed)
-	atomic.AddInt64(&deleted, r.Deleted)
+	copied.IncrInt64(r.Copied)
+	copiedBytes.IncrInt64(r.CopiedBytes)
+	checkedBytes.IncrInt64(r.CheckedBytes)
+	deleted.IncrInt64(r.Deleted)
+	skipped.IncrInt64(r.Skipped)
+	failed.IncrInt64(r.Failed)
+	handled.IncrInt64(r.Copied + r.Deleted + r.Skipped + r.Failed)
 }
 
 func httpRequest(url string, body []byte) (ans []byte, err error) {
@@ -70,19 +75,23 @@ func httpRequest(url string, body []byte) (ans []byte, err error) {
 
 func sendStats(addr string) {
 	var r Stat
-	r.Copied = atomic.LoadInt64(&copied)
-	r.CopiedBytes = atomic.LoadInt64(&copiedBytes)
-	r.Failed = atomic.LoadInt64(&failed)
-	r.Deleted = atomic.LoadInt64(&deleted)
+	r.Copied = copied.Current()
+	r.CopiedBytes = copiedBytes.Current()
+	r.CheckedBytes = checkedBytes.Current()
+	r.Deleted = deleted.Current()
+	r.Skipped = skipped.Current()
+	r.Failed = failed.Current()
 	d, _ := json.Marshal(r)
 	ans, err := httpRequest(fmt.Sprintf("http://%s/stats", addr), d)
 	if err != nil || string(ans) != "OK" {
 		logger.Errorf("update stats: %s %s", string(ans), err)
 	} else {
-		atomic.AddInt64(&copied, -r.Copied)
-		atomic.AddInt64(&copiedBytes, -r.CopiedBytes)
-		atomic.AddInt64(&failed, -r.Failed)
-		atomic.AddInt64(&deleted, -r.Deleted)
+		copied.IncrInt64(-r.Copied)
+		copiedBytes.IncrInt64(-r.CopiedBytes)
+		checkedBytes.IncrInt64(-r.CheckedBytes)
+		deleted.IncrInt64(-r.Deleted)
+		skipped.IncrInt64(-r.Skipped)
+		failed.IncrInt64(-r.Failed)
 	}
 }
 
@@ -123,7 +132,7 @@ func findLocalIP() (string, error) {
 	return "", errors.New("are you connected to the network?")
 }
 
-func startManager(tasks chan object.Object) (string, error) {
+func startManager(tasks <-chan object.Object) (string, error) {
 	http.HandleFunc("/fetch", func(w http.ResponseWriter, req *http.Request) {
 		var objs []object.Object
 		obj, ok := <-tasks
@@ -175,16 +184,16 @@ func startManager(tasks chan object.Object) (string, error) {
 		logger.Debugf("receive stats %+v from %s", r, req.RemoteAddr)
 		_, _ = w.Write([]byte("OK"))
 	})
-	l, err := net.Listen("tcp", "0.0.0.0:0")
+	ip, err := findLocalIP()
+	if err != nil {
+		return "", fmt.Errorf("find local ip: %s", err)
+	}
+	l, err := net.Listen("tcp", ip+":")
 	if err != nil {
 		return "", fmt.Errorf("listen: %s", err)
 	}
 	logger.Infof("Listen at %s", l.Addr())
 	go func() { _ = http.Serve(l, nil) }()
-	ip, err := findLocalIP()
-	if err != nil {
-		return "", fmt.Errorf("find local ip: %s", err)
-	}
 	ps := strings.Split(l.Addr().String(), ":")
 	port := ps[len(ps)-1]
 	return fmt.Sprintf("%s:%s", ip, port), nil
@@ -243,8 +252,11 @@ func launchWorker(address string, config *Config, wg *sync.WaitGroup) {
 				args = append(args, "--manager", address)
 				args = append(args, os.Args[1:]...)
 			}
+			if !config.Verbose && !config.Quiet {
+				args = append(args, "-q")
+			}
 
-			logger.Debugf("launch worker command args: [ssh, %s]\n", strings.Join(args, ", "))
+			logger.Debugf("launch worker command args: [ssh, %s]", strings.Join(args, ", "))
 			cmd = exec.Command("ssh", args...)
 			stderr, err := cmd.StderrPipe()
 			if err != nil {
@@ -295,9 +307,8 @@ func unmarshalObjects(d []byte) ([]object.Object, error) {
 	return objs, nil
 }
 
-func fetchJobs(todo chan object.Object, config *Config) {
+func fetchJobs(tasks chan<- object.Object, config *Config) {
 	for {
-		// fetch jobs
 		url := fmt.Sprintf("http://%s/fetch", config.Manager)
 		ans, err := httpRequest(url, nil)
 		if err != nil {
@@ -317,8 +328,8 @@ func fetchJobs(todo chan object.Object, config *Config) {
 			break
 		}
 		for _, obj := range jobs {
-			todo <- obj
+			tasks <- obj
 		}
 	}
-	close(todo)
+	close(tasks)
 }

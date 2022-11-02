@@ -1,18 +1,20 @@
+//go:build !nocos
 // +build !nocos
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -24,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,9 +56,11 @@ func (c *COS) Create() error {
 func (c *COS) Head(key string) (Object, error) {
 	resp, err := c.c.Object.Head(ctx, key, nil)
 	if err != nil {
+		if exist, err := c.c.Object.IsExist(ctx, key); err == nil && !exist {
+			return nil, os.ErrNotExist
+		}
 		return nil, err
 	}
-
 	header := resp.Header
 	var size int64
 	if val, ok := header["Content-Length"]; ok {
@@ -115,11 +120,12 @@ func (c *COS) Delete(key string) error {
 	return err
 }
 
-func (c *COS) List(prefix, marker string, limit int64) ([]Object, error) {
+func (c *COS) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	param := cos.BucketGetOptions{
-		Prefix:  prefix,
-		Marker:  marker,
-		MaxKeys: int(limit),
+		Prefix:    prefix,
+		Marker:    marker,
+		MaxKeys:   int(limit),
+		Delimiter: delimiter,
 	}
 	resp, _, err := c.c.Bucket.Get(ctx, &param)
 	for err == nil && len(resp.Contents) == 0 && resp.IsTruncated {
@@ -135,6 +141,12 @@ func (c *COS) List(prefix, marker string, limit int64) ([]Object, error) {
 		o := resp.Contents[i]
 		t, _ := time.Parse(time.RFC3339, o.LastModified)
 		objs[i] = &obj{o.Key, int64(o.Size), t, strings.HasSuffix(o.Key, "/")}
+	}
+	if delimiter != "" {
+		for _, p := range resp.CommonPrefixes {
+			objs = append(objs, &obj{p, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -188,11 +200,12 @@ func (c *COS) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, result.NextKeyMarker, nil
 }
 
-func autoCOSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
+func autoCOSEndpoint(bucketName, accessKey, secretKey, token string) (string, error) {
 	client := cos.NewClient(nil, &http.Client{
 		Transport: &cos.AuthorizationTransport{
-			SecretID:  accessKey,
-			SecretKey: secretKey,
+			SecretID:     accessKey,
+			SecretKey:    secretKey,
+			SessionToken: token,
 		},
 	})
 	client.UserAgent = UserAgent
@@ -211,7 +224,10 @@ func autoCOSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
 	return "", fmt.Errorf("bucket %q doesnot exist", bucketName)
 }
 
-func newCOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newCOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)
@@ -224,7 +240,7 @@ func newCOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	}
 
 	if len(hostParts) == 1 {
-		if endpoint, err = autoCOSEndpoint(hostParts[0], accessKey, secretKey); err != nil {
+		if endpoint, err = autoCOSEndpoint(hostParts[0], accessKey, secretKey, token); err != nil {
 			return nil, fmt.Errorf("Unable to get endpoint of bucket %s: %s", hostParts[0], err)
 		}
 		if uri, err = url.ParseRequestURI(endpoint); err != nil {
@@ -236,9 +252,10 @@ func newCOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	b := &cos.BaseURL{BucketURL: uri}
 	client := cos.NewClient(b, &http.Client{
 		Transport: &cos.AuthorizationTransport{
-			SecretID:  accessKey,
-			SecretKey: secretKey,
-			Transport: httpClient.Transport,
+			SecretID:     accessKey,
+			SecretKey:    secretKey,
+			SessionToken: token,
+			Transport:    httpClient.Transport,
 		},
 	})
 	client.UserAgent = UserAgent

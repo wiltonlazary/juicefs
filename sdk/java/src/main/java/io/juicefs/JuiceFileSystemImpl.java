@@ -1,21 +1,23 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package io.juicefs;
 
 import com.kenai.jffi.internal.StubLoader;
 import io.juicefs.metrics.JuiceFSInstrumentation;
+import io.juicefs.utils.BufferPool;
 import io.juicefs.utils.ConsistentHash;
 import io.juicefs.utils.NodesFetcher;
 import io.juicefs.utils.NodesFetcherBuilder;
@@ -23,8 +25,11 @@ import jnr.ffi.LibraryLoader;
 import jnr.ffi.Memory;
 import jnr.ffi.Pointer;
 import jnr.ffi.Runtime;
+import jnr.ffi.annotations.In;
+import jnr.ffi.annotations.Out;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -37,11 +42,9 @@ import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.DataChecksum;
-import org.apache.hadoop.util.DirectBufferPool;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.VersionInfo;
 import org.json.JSONObject;
-import sun.nio.ch.DirectBuffer;
 
 import java.io.*;
 import java.lang.reflect.Constructor;
@@ -50,7 +53,10 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.*;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -58,6 +64,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipEntry;
 
 /****************************************************************
  * Implement the FileSystem API for JuiceFS
@@ -75,7 +82,6 @@ public class JuiceFileSystemImpl extends FileSystem {
   private int minBufferSize;
   private int cacheReplica;
   private boolean fileChecksumEnabled;
-  private boolean posixBehavior;
   private Libjfs lib;
   private long handle;
   private UserGroupInformation ugi;
@@ -87,11 +93,10 @@ public class JuiceFileSystemImpl extends FileSystem {
   private ScheduledExecutorService nodesFetcherThread;
   private ScheduledExecutorService refreshUidThread;
   private Map<String, FileStatus> lastFileStatus = new HashMap<>();
-  private static final DirectBufferPool bufferPool = new DirectBufferPool();
   private boolean metricsEnable = false;
 
   /*
-   * hadoop compability
+   * hadoop compatibility
    */
   private boolean withStreamCapability;
   // constructor for BufferedFSOutputStreamWithStreamCapabilities
@@ -99,7 +104,6 @@ public class JuiceFileSystemImpl extends FileSystem {
   private Method setStorageIds;
   private String[] storageIds;
   private Random random = new Random();
-  private String callerContext;
 
   public static interface Libjfs {
     long jfs_init(String name, String jsonConf, String user, String group, String superuser, String supergroup);
@@ -114,9 +118,9 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     long jfs_lseek(long pid, int fd, long pos, int whence);
 
-    int jfs_pread(long pid, int fd, Pointer b, int len, long offset);
+    int jfs_pread(long pid, int fd, @Out ByteBuffer b, int len, long offset);
 
-    int jfs_write(long pid, int fd, Pointer b, int len);
+    int jfs_write(long pid, int fd, @In ByteBuffer b, int len);
 
     int jfs_flush(long pid, int fd);
 
@@ -136,10 +140,6 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     int jfs_rename(long pid, long h, String src, String dst);
 
-    int jfs_symlink(long pid, long h, String target, String path);
-
-    int jfs_readlink(long pid, long h, String path, Pointer buf, int bufsize);
-
     int jfs_stat1(long pid, long h, String path, Pointer buf);
 
     int jfs_lstat1(long pid, long h, String path, Pointer buf);
@@ -153,8 +153,6 @@ public class JuiceFileSystemImpl extends FileSystem {
     int jfs_setOwner(long pid, long h, String path, String user, String group);
 
     int jfs_utime(long pid, long h, String path, long mtime, long atime);
-
-    int jfs_chown(long pid, long h, String path);
 
     int jfs_listdir(long pid, long h, String path, int offset, Pointer buf, int size);
 
@@ -189,15 +187,15 @@ public class JuiceFileSystemImpl extends FileSystem {
   static int MODE_MASK_X = 1;
 
   private IOException error(int errno, Path p) {
+    String pStr = p == null ? "" : p.toString();
     if (errno == EPERM) {
-      return new PathPermissionException(p.toString());
+      return new PathPermissionException(pStr);
     } else if (errno == ENOTDIR) {
       return new ParentNotDirectoryException();
     } else if (errno == ENOENT) {
-      return new FileNotFoundException(p.toString() + ": not found");
+      return new FileNotFoundException(pStr+ ": not found");
     } else if (errno == EACCESS) {
       try {
-        UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
         String user = ugi.getShortUserName();
         FileStatus stat = getFileStatusInternalNoException(p);
         if (stat != null) {
@@ -208,25 +206,25 @@ public class JuiceFileSystemImpl extends FileSystem {
       } catch (Exception e) {
         LOG.warn("fail to generate better error message", e);
       }
-      return new AccessControlException("Permission denied: " + p.toString());
+      return new AccessControlException("Permission denied: " + pStr);
     } else if (errno == EEXIST) {
       return new FileAlreadyExistsException();
     } else if (errno == EINVAL) {
       return new InvalidRequestException("Invalid parameter");
     } else if (errno == ENOTEMPTY) {
-      return new PathIsNotEmptyDirectoryException(p.toString());
+      return new PathIsNotEmptyDirectoryException(pStr);
     } else if (errno == EINTR) {
       return new InterruptedIOException();
     } else if (errno == ENOTSUP) {
-      return new PathOperationException(p.toString());
+      return new PathOperationException(pStr);
     } else if (errno == ENOSPACE) {
       return new IOException("No space");
     } else if (errno == EROFS) {
       return new IOException("Read-only Filesystem");
     } else if (errno == EIO) {
-      return new IOException(p.toString());
+      return new IOException(pStr);
     } else {
-      return new IOException("errno: " + errno + " " + p.toString());
+      return new IOException("errno: " + errno + " " + pStr);
     }
   }
 
@@ -277,7 +275,7 @@ public class JuiceFileSystemImpl extends FileSystem {
       throw new IOException("name is required");
     }
 
-    blocksize = conf.getLong("juicefs.block.size", conf.getLong("dfs.blocksize", 128 << 20));
+    blocksize = conf.getLongBytes("juicefs.block.size", conf.getLongBytes("dfs.blocksize", 128 << 20));
     minBufferSize = conf.getInt("juicefs.min-buffer-size", 128 << 10);
     cacheReplica = Integer.parseInt(getConf(conf, "cache-replica", "1"));
     fileChecksumEnabled = Boolean.parseBoolean(getConf(conf, "file.checksum", "false"));
@@ -292,10 +290,6 @@ public class JuiceFileSystemImpl extends FileSystem {
     String superuser = getConf(conf, "superuser", "hdfs");
     String supergroup = getConf(conf, "supergroup", conf.get("dfs.permissions.superusergroup", "supergroup"));
     String mountpoint = getConf(conf, "mountpoint", "");
-    posixBehavior = !mountpoint.equals("");
-    if (posixBehavior) {
-      LOG.info("change to POSIX behavior: overwrite in rename, unlink don't follow symlink");
-    }
 
     initCache(conf);
     refreshCache(conf);
@@ -310,19 +304,27 @@ public class JuiceFileSystemImpl extends FileSystem {
     for (String key : bkeys) {
       obj.put(key, Boolean.valueOf(getConf(conf, key, "false")));
     }
+    obj.put("bucket", getConf(conf, "bucket", ""));
     obj.put("readOnly", Boolean.valueOf(getConf(conf, "read-only", "false")));
+    obj.put("noBGJob", Boolean.valueOf(getConf(conf, "no-bgjob", "false")));
     obj.put("cacheDir", getConf(conf, "cache-dir", "memory"));
     obj.put("cacheSize", Integer.valueOf(getConf(conf, "cache-size", "100")));
     obj.put("openCache", Float.valueOf(getConf(conf, "open-cache", "0.0")));
+    obj.put("backupMeta", Integer.valueOf(getConf(conf, "backup-meta", "3600")));
+    obj.put("heartbeat", Integer.valueOf(getConf(conf, "heartbeat", "12")));
     obj.put("attrTimeout", Float.valueOf(getConf(conf, "attr-cache", "0.0")));
     obj.put("entryTimeout", Float.valueOf(getConf(conf, "entry-cache", "0.0")));
     obj.put("dirEntryTimeout", Float.valueOf(getConf(conf, "dir-entry-cache", "0.0")));
     obj.put("cacheFullBlock", Boolean.valueOf(getConf(conf, "cache-full-block", "true")));
+    obj.put("cacheChecksum", getConf(conf, "verify-cache-checksum", "full"));
+    obj.put("cacheScanInterval", Integer.valueOf(getConf(conf, "cache-scan-interval", "300")));
     obj.put("metacache", Boolean.valueOf(getConf(conf, "metacache", "true")));
     obj.put("autoCreate", Boolean.valueOf(getConf(conf, "auto-create-cache-dir", "true")));
     obj.put("maxUploads", Integer.valueOf(getConf(conf, "max-uploads", "20")));
+    obj.put("maxDeletes", Integer.valueOf(getConf(conf, "max-deletes", "2")));
     obj.put("uploadLimit", Integer.valueOf(getConf(conf, "upload-limit", "0")));
     obj.put("downloadLimit", Integer.valueOf(getConf(conf, "download-limit", "0")));
+    obj.put("ioRetries", Integer.valueOf(getConf(conf, "io-retries", "10")));
     obj.put("getTimeout", Integer.valueOf(getConf(conf, "get-timeout", getConf(conf, "object-timeout", "5"))));
     obj.put("putTimeout", Integer.valueOf(getConf(conf, "put-timeout", getConf(conf, "object-timeout", "60"))));
     obj.put("memorySize", Integer.valueOf(getConf(conf, "memory-size", "300")));
@@ -331,6 +333,7 @@ public class JuiceFileSystemImpl extends FileSystem {
     obj.put("pushGateway", getConf(conf, "push-gateway", ""));
     obj.put("pushInterval", Integer.valueOf(getConf(conf, "push-interval", "10")));
     obj.put("pushAuth", getConf(conf, "push-auth", ""));
+    obj.put("pushGraphite", getConf(conf, "push-graphite", ""));
     obj.put("fastResolve", Boolean.valueOf(getConf(conf, "fast-resolve", "true")));
     obj.put("noUsageReport", Boolean.valueOf(getConf(conf, "no-usage-report", "false")));
     obj.put("freeSpace", getConf(conf, "free-space", "0.1"));
@@ -368,8 +371,6 @@ public class JuiceFileSystemImpl extends FileSystem {
     hflushMethod = getConf(conf, "hflush", "writeback");
     initializeStorageIds(conf);
 
-    callerContext = getConf(conf, "caller-context", null);
-
     if ("true".equalsIgnoreCase(getConf(conf, "enable-metrics", "false"))) {
       metricsEnable = true;
       JuiceFSInstrumentation.init(this, statistics);
@@ -391,6 +392,14 @@ public class JuiceFileSystemImpl extends FileSystem {
     URI uri = path.toUri();
     FileSystem fs;
     try {
+      URI defaultUri = getDefaultUri(getConf());
+      if (uri.getScheme() == null) {
+        uri = defaultUri;
+      } else {
+        if (uri.getAuthority() == null && (uri.getScheme().equals(defaultUri.getScheme()))) {
+          uri = defaultUri;
+        }
+      }
       if (getScheme().equals(uri.getScheme()) &&
               (name != null && name.equals(uri.getAuthority()))) {
         fs = this;
@@ -501,38 +510,70 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     LibraryLoader<Libjfs> libjfsLibraryLoader = LibraryLoader.create(Libjfs.class);
     libjfsLibraryLoader.failImmediately();
-    String name = "libjfs.3.so";
+
+    int soVer = 7;
+    String osId = "so";
+    String archId = "amd64";
+    String resourceFormat = "libjfs-%s.%s.gz";
+    String nameFormat = "libjfs-%s.%d.%s";
+
     File dir = new File("/tmp");
     String os = System.getProperty("os.name");
+    String arch = System.getProperty("os.arch");
+    if (arch.contains("aarch64")) {
+      archId = "arm64";
+    }
     if (os.toLowerCase().contains("windows")) {
-      name = "libjfs2.dll";
+      osId = "dll";
       dir = new File(System.getProperty("java.io.tmpdir"));
+    } else if (os.toLowerCase().contains("mac")) {
+      osId = "dylib";
     }
+
+    String resource = String.format(resourceFormat, archId, osId);
+    String name = String.format(nameFormat, archId, soVer, osId);
+
     File libFile = new File(dir, name);
-    URL res = JuiceFileSystemImpl.class.getResource("/libjfs.so.gz");
-    if (res == null) {
+
+    InputStream ins;
+    long soTime;
+    URL location = JuiceFileSystemImpl.class.getProtectionDomain().getCodeSource().getLocation();
+    if (location == null) {
       // jar may changed
-      return libjfsLibraryLoader.load(libFile.getAbsolutePath());
+      return loadExistLib(libjfsLibraryLoader, dir, name, libFile);
     }
-    URLConnection conn;
+    URLConnection con;
     try {
-      conn = res.openConnection();
+      con = location.openConnection();
     } catch (FileNotFoundException e) {
       // jar may changed
-      return libjfsLibraryLoader.load(libFile.getAbsolutePath());
+      return loadExistLib(libjfsLibraryLoader, dir, name, libFile);
+    }
+    if (location.getProtocol().equals("jar") && (con instanceof JarURLConnection)) {
+      LOG.debug("juicefs-hadoop.jar is a nested jar");
+      JarURLConnection connection = (JarURLConnection) con;
+      JarFile jfsJar = connection.getJarFile();
+      ZipEntry entry = jfsJar.getJarEntry(resource);
+      soTime = entry.getLastModifiedTime().toMillis();
+      ins = jfsJar.getInputStream(entry);
+    } else {
+      String jarPath = URLDecoder.decode(location.getPath(), Charset.defaultCharset().name());
+      if (Files.isDirectory(Paths.get(jarPath))) { // for debug: sdk/java/target/classes
+        soTime = con.getLastModified();
+        ins = JuiceFileSystemImpl.class.getClassLoader().getResourceAsStream(resource);
+      } else {
+        JarFile jfsJar;
+        try {
+          jfsJar = new JarFile(jarPath);
+        } catch (FileNotFoundException fne) {
+          return loadExistLib(libjfsLibraryLoader, dir, name, libFile);
+        }
+        ZipEntry entry = jfsJar.getJarEntry(resource);
+        soTime = entry.getLastModifiedTime().toMillis();
+        ins = jfsJar.getInputStream(entry);
+      }
     }
 
-    long soTime = conn.getLastModified();
-    if (res.getProtocol().equalsIgnoreCase("jar")) {
-      String jarPath = Paths.get(URI.create(res.getFile()))
-              .getParent().toUri().getPath().trim();
-      jarPath = jarPath.substring(0, jarPath.length() - 1);
-      soTime = new JarFile(jarPath).getJarEntry("libjfs.so.gz")
-              .getLastModifiedTime()
-              .toMillis();
-    }
-
-    InputStream ins = conn.getInputStream();
     synchronized (JuiceFileSystemImpl.class) {
       if (!libFile.exists() || libFile.lastModified() < soTime) {
         // try the name for current user
@@ -550,21 +591,27 @@ public class JuiceFileSystemImpl extends FileSystem {
           reader.close();
           tmp.setLastModified(soTime);
           tmp.setReadable(true, false);
-          new File(dir, name).delete();
-          if (tmp.renameTo(new File(dir, name))) {
-            // updated libjfs.so
-            libFile = new File(dir, name);
-          } else {
-            libFile.delete();
-            if (!tmp.renameTo(libFile)) {
-              throw new IOException("Can't update " + libFile);
-            }
+          try {
+            File org = new File(dir, name);
+            Files.move(tmp.toPath(), org.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            libFile = org;
+          } catch (Exception ade) {
+            Files.move(tmp.toPath(), libFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
           }
         }
       }
     }
     ins.close();
     return libjfsLibraryLoader.load(libFile.getAbsolutePath());
+  }
+
+  private static Libjfs loadExistLib(LibraryLoader<Libjfs> libjfsLibraryLoader, File dir, String name, File libFile) {
+    File currentUserLib = new File(dir, System.getProperty("user.name") + "-" + name);
+    if (currentUserLib.exists()) {
+      return libjfsLibraryLoader.load(currentUserLib.getAbsolutePath());
+    } else {
+      return libjfsLibraryLoader.load(libFile.getAbsolutePath());
+    }
   }
 
   private void initCache(Configuration conf) {
@@ -706,7 +753,7 @@ public class JuiceFileSystemImpl extends FileSystem {
     public FileInputStream(Path f, int fd, int size) throws IOException {
       path = f;
       this.fd = fd;
-      buf = bufferPool.getBuffer(size);
+      buf = BufferPool.getBuffer(size);
       buf.limit(0);
       position = 0;
     }
@@ -753,34 +800,7 @@ public class JuiceFileSystemImpl extends FileSystem {
     public synchronized int read(byte[] b, int off, int len) throws IOException {
       if (off < 0 || len < 0 || b.length - off < len)
         throw new IndexOutOfBoundsException();
-      if (len == 0)
-        return 0;
-      if (buf == null)
-        throw new IOException("stream was closed");
-      if (!buf.hasRemaining() && len <= buf.capacity() && !refill())
-        return -1; // No bytes were read before EOF.
-
-      int read = Math.min(buf.remaining(), len);
-      if (read > 0) {
-        buf.get(b, off, read);
-        statistics.incrementBytesRead(read);
-        off += read;
-        len -= read;
-      }
-      if (len == 0)
-        return read;
-      int more = read(position, b, off, len);
-      if (more <= 0) {
-        if (read > 0) {
-          return read;
-        } else {
-          return -1;
-        }
-      }
-      position += more;
-      buf.position(0);
-      buf.limit(0);
-      return read + more;
+      return read(ByteBuffer.wrap(b, off, len));
     }
 
     private boolean refill() throws IOException {
@@ -790,7 +810,6 @@ public class JuiceFileSystemImpl extends FileSystem {
         buf.limit(0);
         return false; // EOF
       }
-      statistics.incrementBytesRead(-read);
       buf.position(0);
       buf.limit(read);
       position += read;
@@ -799,27 +818,10 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     @Override
     public synchronized int read(long pos, byte[] b, int off, int len) throws IOException {
-      if (len == 0)
-        return 0;
-      if (buf == null)
-        throw new IOException("stream was closed");
-      if (pos < 0)
-        throw new EOFException("position is negative");
       if (b == null || off < 0 || len < 0 || b.length - off < len) {
         throw new IllegalArgumentException("arguments: " + off + " " + len);
       }
-      if (len > 128 << 20) {
-        len = 128 << 20;
-      }
-      Pointer tmp = Memory.allocate(Runtime.getRuntime(lib), len);
-      int got = lib.jfs_pread(Thread.currentThread().getId(), fd, tmp, len, pos);
-      if (got == 0)
-        return -1;
-      if (got == EINVAL)
-        throw new IOException("stream was closed");
-      if (got < 0)
-        throw error(got, path);
-      tmp.get(0, b, off, got);
+      int got = read(pos, ByteBuffer.wrap(b, off, len));
       statistics.incrementBytesRead(got);
       return got;
     }
@@ -839,39 +841,31 @@ public class JuiceFileSystemImpl extends FileSystem {
         got++;
       }
       statistics.incrementBytesRead(got);
-      if (!b.hasRemaining())
-        return got;
       int more = read(position, b);
       if (more <= 0)
         return got > 0 ? got : -1;
       position += more;
+      statistics.incrementBytesRead(more);
       buf.position(0);
       buf.limit(0);
       return got + more;
     }
 
-    public synchronized int read(long pos, ByteBuffer b) throws IOException {
+    private synchronized int read(long pos, ByteBuffer b) throws IOException {
+      if (pos < 0)
+        throw new EOFException("position is negative");
       if (!b.hasRemaining())
         return 0;
       int got;
-      if (b.hasArray()) {
-        got = read(pos, b.array(), b.position(), b.remaining());
-        if (got <= 0)
-          return got;
-      } else {
-        assert b.isDirect();
-        long address = ((DirectBuffer) b).address() + b.position();
-        Pointer destPtr = Runtime.getRuntime(lib).getMemoryManager().newPointer(address);
-        got = lib.jfs_pread(Thread.currentThread().getId(), fd, destPtr, b.remaining(), pos);
-        if (got == EINVAL)
-          throw new IOException("stream was closed");
-        if (got < 0)
-          throw error(got, path);
-        if (got == 0)
-          return -1;
-        statistics.incrementBytesRead(got);
-      }
-      b.position(b.position() + got);
+      int startPos = b.position();
+      got = lib.jfs_pread(Thread.currentThread().getId(), fd, b, b.remaining(), pos);
+      if (got == EINVAL)
+        throw new IOException("stream was closed");
+      if (got < 0)
+        throw error(got, path);
+      if (got == 0)
+        return -1;
+      b.position(startPos + got);
       return got;
     }
 
@@ -912,45 +906,12 @@ public class JuiceFileSystemImpl extends FileSystem {
       if (buf == null) {
         return; // already closed
       }
-      bufferPool.returnBuffer(buf);
+      BufferPool.returnBuffer(buf);
       buf = null;
       int r = lib.jfs_close(Thread.currentThread().getId(), fd);
       fd = 0;
       if (r < 0)
         throw error(r, path);
-    }
-  }
-
-  private Map<String, FileSystem> fsCache = new HashMap<String, FileSystem>();
-
-  private FileSystem getFileSystem(Path path) throws IOException {
-    URI uri = path.toUri();
-    String scheme = uri.getScheme();
-    if (scheme == null) {
-      return this;
-    }
-    String key = scheme.toLowerCase() + "://";
-    String authority = uri.getAuthority();
-    if (authority != null) {
-      key += authority.toLowerCase();
-    }
-    if (callerContext != null && !"".equals(callerContext.trim())) {
-      try {
-        Class<?> ctx = Class.forName("io.juicefs.utils.CallerContextUtil");
-        Method setContext = ctx.getDeclaredMethod("setContext", String.class);
-        setContext.invoke(null, callerContext);
-      } catch (ClassNotFoundException ignored) {
-      } catch (Throwable e) {
-        LOG.error(e.getMessage(), e);
-      }
-    }
-    synchronized (this) {
-      FileSystem fs = fsCache.get(key);
-      if (fs == null) {
-        fs = FileSystem.newInstance(uri, getConf());
-        fsCache.put(key, fs);
-      }
-      return fs;
     }
   }
 
@@ -1015,9 +976,7 @@ public class JuiceFileSystemImpl extends FileSystem {
       if (b.length - off < len) {
         throw new IndexOutOfBoundsException();
       }
-      Pointer buf = Memory.allocate(Runtime.getRuntime(lib), len);
-      buf.put(0, b, off, len);
-      int done = lib.jfs_write(Thread.currentThread().getId(), fd, buf, len);
+      int done = lib.jfs_write(Thread.currentThread().getId(), fd, ByteBuffer.wrap(b, off, len), len);
       if (done == EINVAL)
         throw new IOException("stream was closed");
       if (done < 0)
@@ -1029,9 +988,9 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     @Override
     public void write(int b) throws IOException {
-      Pointer buf = Memory.allocate(Runtime.getRuntime(lib), 1);
-      buf.putByte(0, (byte) b);
-      int done = lib.jfs_write(Thread.currentThread().getId(), fd, buf, 1);
+      int done = lib.jfs_write(Thread.currentThread().getId(), fd, ByteBuffer.wrap(new byte[]{(byte) b}), 1);
+      if (done == EINVAL)
+        throw new IOException("stream was closed");
       if (done < 0)
         throw error(done, path);
       if (done < 1)
@@ -1073,6 +1032,10 @@ public class JuiceFileSystemImpl extends FileSystem {
       flush();
       ((FSOutputStream) out).fsync();
     }
+
+    public OutputStream getOutputStream() {
+      return out;
+    }
   }
 
   static class BufferedFSOutputStreamWithStreamCapabilities extends BufferedFSOutputStream
@@ -1107,26 +1070,26 @@ public class JuiceFileSystemImpl extends FileSystem {
   public FSDataOutputStream create(Path f, FsPermission permission, boolean overwrite, int bufferSize,
                                    short replication, long blockSize, Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
+    permission = permission.applyUMask(uMask);
     while (true) {
       int fd = lib.jfs_create(Thread.currentThread().getId(), handle, normalizePath(f), permission.toShort());
       if (fd == ENOENT) {
-        Path parent = f.getParent();
-        FsPermission perm = FsPermission.getDirDefault().applyUMask(FsPermission.getUMask(getConf()));
+        Path parent = makeQualified(f).getParent();
         try {
-          mkdirs(parent, perm);
+          mkdirs(parent, FsPermission.getDirDefault());
         } catch (FileAlreadyExistsException e) {
         }
         continue;
       }
       if (fd == EEXIST) {
         if (!overwrite || isDirectory(f)) {
-          throw new FileAlreadyExistsException("File already exists: " + f);
+          throw new FileAlreadyExistsException("Path already exists: " + f);
         }
         delete(f, false);
         continue;
       }
       if (fd < 0) {
-        throw error(fd, f.getParent());
+        throw error(fd, makeQualified(f).getParent());
       }
       return createFsDataOutputStream(f, bufferSize, fd, 0L);
     }
@@ -1143,6 +1106,7 @@ public class JuiceFileSystemImpl extends FileSystem {
   public FSDataOutputStream createNonRecursive(Path f, FsPermission permission, EnumSet<CreateFlag> flag,
                                                int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
+    permission = permission.applyUMask(uMask);
     int fd = lib.jfs_create(Thread.currentThread().getId(), handle, normalizePath(f), permission.toShort());
     while (fd == EEXIST) {
       if (!flag.contains(CreateFlag.OVERWRITE) || isDirectory(f)) {
@@ -1152,7 +1116,7 @@ public class JuiceFileSystemImpl extends FileSystem {
       fd = lib.jfs_create(Thread.currentThread().getId(), handle, normalizePath(f), permission.toShort());
     }
     if (fd < 0) {
-      throw error(fd, f.getParent());
+      throw error(fd, makeQualified(f).getParent());
     }
     return createFsDataOutputStream(f, bufferSize, fd, 0L);
   }
@@ -1187,13 +1151,14 @@ public class JuiceFileSystemImpl extends FileSystem {
     int bytesPerCrc = getConf().getInt("io.bytes.per.checksum", 512);
     DataChecksum summer = DataChecksum.newDataChecksum(ctype, bytesPerCrc);
 
-    long crcPerBlock = 0;
     DataOutputBuffer checksumBuf = new DataOutputBuffer();
     DataOutputBuffer crcBuf = new DataOutputBuffer();
     byte[] buf = new byte[bytesPerCrc];
     FSDataInputStream in = open(f, 1 << 20);
-    while (length > 0) {
-      for (int i = 0; i < blocksize / bytesPerCrc && length > 0; i++) {
+    boolean eof = false;
+    long got = 0;
+    while (got < length && !eof) {
+      for (int i = 0; i < blocksize / bytesPerCrc && got < length; i++) {
         int n;
         if (length < bytesPerCrc) {
           n = in.read(buf, 0, (int) length);
@@ -1201,20 +1166,18 @@ public class JuiceFileSystemImpl extends FileSystem {
           n = in.read(buf);
         }
         if (n <= 0) {
-          length = 0; // EOF
+          eof = true;
+          break;
         } else {
           summer.update(buf, 0, n);
           summer.writeValue(crcBuf, true);
-          length -= n;
+          got += n;
         }
       }
       if (crcBuf.getLength() > 0) {
         MD5Hash blockMd5 = MD5Hash.digest(crcBuf.getData(), 0, crcBuf.getLength());
         blockMd5.write(checksumBuf);
         crcBuf.reset();
-        if (length > 0) { // more than one block
-          crcPerBlock = blocksize / bytesPerCrc;
-        }
       }
     }
     in.close();
@@ -1222,6 +1185,10 @@ public class JuiceFileSystemImpl extends FileSystem {
       return new MD5MD5CRC32GzipFileChecksum(0, 0, MD5Hash.digest(new byte[32]));
     }
     MD5Hash md5 = MD5Hash.digest(checksumBuf.getData());
+    long crcPerBlock = 0;
+    if (got > blocksize) { // more than one block
+      crcPerBlock = blocksize / bytesPerCrc;
+    }
     if (ctype == DataChecksum.Type.CRC32C) {
       return new MD5MD5CRC32CastagnoliFileChecksum(bytesPerCrc, crcPerBlock, md5);
     } else {
@@ -1232,12 +1199,15 @@ public class JuiceFileSystemImpl extends FileSystem {
   @Override
   public void concat(final Path dst, final Path[] srcs) throws IOException {
     statistics.incrementWriteOps(1);
-    if (getFileStatus(dst).getLen() == 0) {
-      throw new IOException(dst + "is empty");
+    if (srcs.length == 0) {
+      throw new IllegalArgumentException("No sources given");
     }
+    Path dp = makeQualified(dst).getParent();
     for (Path src : srcs) {
-      if (!exists(src)) {
-        throw new FileNotFoundException(src.toString());
+      if (!makeQualified(src).getParent().equals(dp)) {
+        throw new HadoopIllegalArgumentException("Source file " + normalizePath(src)
+                + " is not in the same directory with the target "
+                + normalizePath(dst));
       }
     }
     byte[][] srcbytes = new byte[srcs.length][];
@@ -1255,22 +1225,31 @@ public class JuiceFileSystemImpl extends FileSystem {
     }
     int r = lib.jfs_concat(Thread.currentThread().getId(), handle, normalizePath(dst), buf, bufsize);
     if (r < 0) {
+      if (r == ENOENT) {
+        if (!exists(dst)) {
+          throw error(r, dst);
+        } else {
+          throw new FileNotFoundException("one of srcs is missing");
+        }
+      }
       throw error(r, dst);
-    }
-    for (Path src : srcs) {
-      delete(src, false);
     }
   }
 
   @Override
   public boolean rename(Path src, Path dst) throws IOException {
     statistics.incrementWriteOps(1);
+    String srcStr = makeQualified(src).toUri().getPath();
+    String dstStr = makeQualified(dst).toUri().getPath();
+    if (src.equals(dst)) {
+      FileStatus st = getFileStatus(src);
+      return st.isFile();
+    }
+    if (dstStr.startsWith(srcStr) && (dstStr.charAt(srcStr.length()) == Path.SEPARATOR_CHAR)) {
+      return false;
+    }
     int r = lib.jfs_rename(Thread.currentThread().getId(), handle, normalizePath(src), normalizePath(dst));
     if (r == EEXIST) {
-      if (posixBehavior) {
-        FileStatus stt = getFileLinkStatus(dst);
-        throw new IOException("unexpected " + stt);
-      }
       try {
         FileStatus st = getFileStatus(dst);
         if (st.isDirectory()) {
@@ -1298,41 +1277,12 @@ public class JuiceFileSystemImpl extends FileSystem {
   }
 
   private boolean rmr(Path p) throws IOException {
-    FileStatus st;
-    try {
-      st = getFileLinkStatus(p);
-    } catch (FileNotFoundException e) {
-      return false;
-    }
     int r = lib.jfs_rmr(Thread.currentThread().getId(), handle, normalizePath(p));
     if (r == ENOENT) {
       return false;
     }
     if (r < 0) {
       throw error(r, p);
-    }
-    if (posixBehavior)
-      return true;
-    try {
-      st = getFileLinkStatus(p);
-    } catch (FileNotFoundException e) {
-      return true;
-    }
-    if (st.isSymlink()) {
-      try {
-        Path target = st.getSymlink();
-        FileSystem fs = getFileSystem(target);
-        fs.delete(target, true);
-      } catch (FileNotFoundException e) {
-      }
-      return delete(p, false);
-    }
-    if (st.isDirectory()) {
-      FileStatus[] children = listStatus(p);
-      for (int i = 0; i < children.length; i++) {
-        rmr(children[i].getPath());
-      }
-      return rmr(p);
     }
     return true;
   }
@@ -1342,29 +1292,12 @@ public class JuiceFileSystemImpl extends FileSystem {
     statistics.incrementWriteOps(1);
     if (recursive)
       return rmr(p);
-    FileStatus st = null;
-    if (!posixBehavior) {
-      try {
-        st = getFileLinkStatus(p);
-      } catch (FileNotFoundException e) {
-        return false;
-      }
-    }
     int r = lib.jfs_delete(Thread.currentThread().getId(), handle, normalizePath(p));
     if (r == ENOENT) {
       return false;
     }
     if (r < 0) {
       throw error(r, p);
-    }
-    if (!posixBehavior && st.isSymlink()) {
-      Path target = st.getSymlink();
-      try {
-        FileSystem fs = getFileSystem(target);
-        fs.delete(target, false);
-      } catch (IllegalArgumentException ignored) {
-        LOG.warn("invalid symlink " + p + " -> " + target);
-      }
     }
     return true;
   }
@@ -1395,12 +1328,7 @@ public class JuiceFileSystemImpl extends FileSystem {
     String user = buf.getString(28);
     String group = buf.getString(28 + user.length() + 1);
     assert (30 + user.length() + group.length() == size);
-    if (readlink && ((mode >> 27) & 1) == 1) {
-      return new FileStatus(length, isdir, 1, blocksize, mtime, atime, perm, user, group,
-              getLinkTarget(p), p);
-    } else {
-      return new FileStatus(length, isdir, 1, blocksize, mtime, atime, perm, user, group, p);
-    }
+    return new FileStatus(length, isdir, 1, blocksize, mtime, atime, perm, user, group, p);
   }
 
   @Override
@@ -1433,18 +1361,8 @@ public class JuiceFileSystemImpl extends FileSystem {
           System.arraycopy(results, 0, rs, 0, j);
           results = rs;
         }
-        // resolve symlink to target
         Path p = makeQualified(new Path(f, new String(name)));
-        FileStatus st = newFileStatus(p, buf.slice(offset + 1), size, true);
-        if (st.isSymlink() && !posixBehavior) {
-          Path target = st.getSymlink();
-          try {
-            st = getFileSystem(target).getFileStatus(target);
-          } catch (IOException e) {
-            LOG.warn("broken symlink " + p + " -> " + target);
-          }
-          st.setPath(p);
-        }
+        FileStatus st = newFileStatus(p, buf.slice(offset + 1), size, false);
         results[j] = st;
         offset += 1 + size;
         j++;
@@ -1489,51 +1407,22 @@ public class JuiceFileSystemImpl extends FileSystem {
     if (r == 0 || r == EEXIST && !isFile(f)) {
       return true;
     } else if (r == ENOENT) {
-      Path parent = f.getParent();
+      Path parent = makeQualified(f).getParent();
       if (parent != null) {
         return mkdirs(parent, permission) && mkdirs(f, permission);
       }
     }
-    throw error(r, f.getParent());
+    throw error(r, makeQualified(f).getParent());
   }
 
   @Override
   public FileStatus getFileStatus(Path f) throws IOException {
     statistics.incrementReadOps(1);
-    return getFileStatusInternal(f, true);
-  }
-
-  @Override
-  public void createSymlink(final Path target, final Path link, final boolean createParent) throws IOException {
-    statistics.incrementWriteOps(1);
-    if (createParent) {
-      Path parent = link.getParent();
-      if (parent != null) {
-        FsPermission perm = FsPermission.getDirDefault().applyUMask(FsPermission.getUMask(getConf()));
-        mkdirs(parent, perm);
-      }
-    }
-    String targetPath;
     try {
-      targetPath = normalizePath(target);
-    } catch (IllegalArgumentException e) {
-      targetPath = URLDecoder.decode(target.toUri().toString());
+      return getFileStatusInternal(f, true);
+    } catch (ParentNotDirectoryException e) {
+      throw new FileNotFoundException(f.toString());
     }
-    int r = lib.jfs_symlink(Thread.currentThread().getId(), handle, targetPath, normalizePath(link));
-    if (r != 0) {
-      throw error(r, link.getParent());
-    }
-  }
-
-  @Override
-  public FileStatus getFileLinkStatus(final Path f) throws IOException {
-    statistics.incrementReadOps(1);
-    FileStatus st = getFileStatusInternal(f, false);
-    if (st.isSymlink()) {
-      Path targetQual = FSLinkResolver.qualifySymlinkTarget(getUri(), st.getPath(), st.getSymlink());
-      st.setSymlink(targetQual);
-    }
-    return st;
   }
 
   private FileStatus getFileStatusInternal(final Path f, boolean dereference) throws IOException {
@@ -1569,19 +1458,6 @@ public class JuiceFileSystemImpl extends FileSystem {
   @Override
   public String getCanonicalServiceName() {
     return null; // Does not support Token
-  }
-
-  @Override
-  public Path getLinkTarget(Path f) throws IOException {
-    statistics.incrementReadOps(1);
-    Pointer tbuf = Memory.allocate(Runtime.getRuntime(lib), 4096);
-    int r = lib.jfs_readlink(Thread.currentThread().getId(), handle, normalizePath(f), tbuf, 4096);
-    if (r < 0) {
-      throw error(r, f);
-    }
-    Path target = new Path(tbuf.getString(0));
-    Path fullTarget = FSLinkResolver.qualifySymlinkTarget(getUri(), f, target);
-    return fullTarget;
   }
 
   @Override
@@ -1713,6 +1589,9 @@ public class JuiceFileSystemImpl extends FileSystem {
 
   public void removeXAttr(Path path, String name) throws IOException {
     int r = lib.jfs_removeXattr(Thread.currentThread().getId(), handle, normalizePath(path), name);
+    if (r == ENOATTR || r == ENODATA) {
+      throw new IOException("No matching attributes found for remove operation");
+    }
     if (r < 0)
       throw error(r, path);
   }

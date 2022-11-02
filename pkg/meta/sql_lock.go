@@ -1,16 +1,20 @@
+//go:build !nosqlite || !nomysql || !nopg
+// +build !nosqlite !nomysql !nopg
+
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
@@ -34,13 +38,14 @@ func (m *dbMeta) Flock(ctx Context, inode Ino, owner_ uint64, ltype uint32, bloc
 	var err syscall.Errno
 	for {
 		err = errno(m.txn(func(s *xorm.Session) error {
-			if exists, err := s.Get(&node{Inode: inode}); err != nil || !exists {
+			if exists, err := s.ForUpdate().Get(&node{Inode: inode}); err != nil || !exists {
 				if err == nil && !exists {
 					err = syscall.ENOENT
 				}
 				return err
 			}
-			rows, err := s.Rows(&flock{Inode: inode})
+			var fs []flock
+			err := s.ForUpdate().Find(&fs, &flock{Inode: inode})
 			if err != nil {
 				return err
 			}
@@ -49,13 +54,9 @@ func (m *dbMeta) Flock(ctx Context, inode Ino, owner_ uint64, ltype uint32, bloc
 				o   int64
 			}
 			var locks = make(map[key]flock)
-			var l flock
-			for rows.Next() {
-				if rows.Scan(&l) == nil {
-					locks[key{l.Sid, l.Owner}] = l
-				}
+			for _, l := range fs {
+				locks[key{l.Sid, l.Owner}] = l
 			}
-			rows.Close()
 
 			if ltype == F_RDLCK {
 				for _, l := range locks {
@@ -71,13 +72,17 @@ func (m *dbMeta) Flock(ctx Context, inode Ino, owner_ uint64, ltype uint32, bloc
 			if len(locks) > 0 {
 				return syscall.EAGAIN
 			}
+			var n int64
 			if ok {
-				_, err = s.Cols("Ltype").Update(&flock{Ltype: 'W'}, &flock{Inode: inode, Owner: owner, Sid: m.sid})
+				n, err = s.Cols("Ltype").Update(&flock{Ltype: 'W'}, &flock{Inode: inode, Owner: owner, Sid: m.sid})
 			} else {
-				err = mustInsert(s, flock{Inode: inode, Owner: owner, Ltype: 'W', Sid: m.sid})
+				n, err = s.InsertOne(&flock{Inode: inode, Owner: owner, Ltype: 'W', Sid: m.sid})
+			}
+			if err == nil && n == 0 {
+				err = fmt.Errorf("insert/update failed")
 			}
 			return err
-		}))
+		}, inode))
 
 		if !block || err != syscall.EAGAIN {
 			break
@@ -103,7 +108,7 @@ func (m *dbMeta) Getlk(ctx Context, inode Ino, owner_ uint64, ltype *uint32, sta
 	}
 
 	owner := int64(owner_)
-	rows, err := m.engine.Rows(&plock{Inode: inode})
+	rows, err := m.db.Rows(&plock{Inode: inode})
 	if err != nil {
 		return errno(err)
 	}
@@ -114,22 +119,23 @@ func (m *dbMeta) Getlk(ctx Context, inode Ino, owner_ uint64, ltype *uint32, sta
 	var locks = make(map[key][]byte)
 	var l plock
 	for rows.Next() {
+		l.Records = nil
 		if rows.Scan(&l) == nil && !(l.Sid == m.sid && l.Owner == owner) {
 			locks[key{l.Sid, l.Owner}] = dup(l.Records)
 		}
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	for k, d := range locks {
-		ls := loadLocks([]byte(d))
+		ls := loadLocks(d)
 		for _, l := range ls {
 			// find conflicted locks
-			if (*ltype == F_WRLCK || l.ltype == F_WRLCK) && *end >= l.start && *start <= l.end {
-				*ltype = l.ltype
-				*start = l.start
-				*end = l.end
+			if (*ltype == F_WRLCK || l.Type == F_WRLCK) && *end >= l.Start && *start <= l.End {
+				*ltype = l.Type
+				*start = l.Start
+				*end = l.End
 				if k.sid == m.sid {
-					*pid = l.pid
+					*pid = l.Pid
 				} else {
 					*pid = 0
 				}
@@ -150,7 +156,7 @@ func (m *dbMeta) Setlk(ctx Context, inode Ino, owner_ uint64, block bool, ltype 
 	owner := int64(owner_)
 	for {
 		err = errno(m.txn(func(s *xorm.Session) error {
-			if exists, err := s.Get(&node{Inode: inode}); err != nil || !exists {
+			if exists, err := s.ForUpdate().Get(&node{Inode: inode}); err != nil || !exists {
 				if err == nil && !exists {
 					err = syscall.ENOENT
 				}
@@ -158,14 +164,14 @@ func (m *dbMeta) Setlk(ctx Context, inode Ino, owner_ uint64, block bool, ltype 
 			}
 			if ltype == F_UNLCK {
 				var l = plock{Inode: inode, Owner: owner, Sid: m.sid}
-				ok, err := m.engine.Get(&l)
+				ok, err := s.ForUpdate().Get(&l)
 				if err != nil {
 					return err
 				}
 				if !ok {
 					return nil
 				}
-				ls := loadLocks([]byte(l.Records))
+				ls := loadLocks(l.Records)
 				if len(ls) == 0 {
 					return nil
 				}
@@ -177,7 +183,8 @@ func (m *dbMeta) Setlk(ctx Context, inode Ino, owner_ uint64, block bool, ltype 
 				}
 				return err
 			}
-			rows, err := s.Rows(&plock{Inode: inode})
+			var ps []plock
+			err := s.ForUpdate().Find(&ps, &plock{Inode: inode})
 			if err != nil {
 				return err
 			}
@@ -186,27 +193,23 @@ func (m *dbMeta) Setlk(ctx Context, inode Ino, owner_ uint64, block bool, ltype 
 				owner int64
 			}
 			var locks = make(map[key][]byte)
-			var l plock
-			for rows.Next() {
-				if rows.Scan(&l) == nil {
-					locks[key{l.Sid, l.Owner}] = dup(l.Records)
-				}
+			for _, l := range ps {
+				locks[key{l.Sid, l.Owner}] = l.Records
 			}
-			rows.Close()
 			lkey := key{m.sid, owner}
 			for k, d := range locks {
 				if k == lkey {
 					continue
 				}
-				ls := loadLocks([]byte(d))
+				ls := loadLocks(d)
 				for _, l := range ls {
 					// find conflicted locks
-					if (ltype == F_WRLCK || l.ltype == F_WRLCK) && end >= l.start && start <= l.end {
+					if (ltype == F_WRLCK || l.Type == F_WRLCK) && end >= l.Start && start <= l.End {
 						return syscall.EAGAIN
 					}
 				}
 			}
-			ls := updateLocks(loadLocks([]byte(locks[lkey])), lock)
+			ls := updateLocks(loadLocks(locks[lkey]), lock)
 			var n int64
 			if len(locks[lkey]) > 0 {
 				n, err = s.Cols("records").Update(plock{Records: dumpLocks(ls)},
@@ -218,7 +221,7 @@ func (m *dbMeta) Setlk(ctx Context, inode Ino, owner_ uint64, block bool, ltype 
 				err = fmt.Errorf("insert/update failed")
 			}
 			return err
-		}))
+		}, inode))
 
 		if !block || err != syscall.EAGAIN {
 			break

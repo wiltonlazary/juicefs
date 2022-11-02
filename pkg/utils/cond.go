@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package utils
@@ -20,36 +21,34 @@ import (
 	"time"
 )
 
-// Cond is similar to sync.Cond, but you can wait without a timeout.
+// Cond is similar to sync.Cond, but you can wait with a timeout.
 type Cond struct {
 	L      sync.Locker
-	signal chan bool
+	signal chan struct{}
 }
 
 // Signal wakes up a waiter.
+// It's required for the caller to hold L.
 func (c *Cond) Signal() {
 	select {
-	case c.signal <- true:
+	case c.signal <- struct{}{}:
 	default:
 	}
 }
 
 // Broadcast wake up all the waiters.
+// It's required for the caller to hold L.
 func (c *Cond) Broadcast() {
-	for {
-		select {
-		case c.signal <- true:
-		default:
-			return
-		}
-	}
+	close(c.signal)
+	c.signal = make(chan struct{})
 }
 
 // Wait until Signal() or Broadcast() is called.
 func (c *Cond) Wait() {
+	ch := c.signal
 	c.L.Unlock()
-	defer c.L.Lock()
-	<-c.signal
+	<-ch
+	c.L.Lock()
 }
 
 var timerPool = sync.Pool{
@@ -61,16 +60,17 @@ var timerPool = sync.Pool{
 // WaitWithTimeout wait for a signal or a period of timeout eclipsed.
 // returns true in case of timeout else false
 func (c *Cond) WaitWithTimeout(d time.Duration) bool {
+	ch := c.signal
 	c.L.Unlock()
 	t := timerPool.Get().(*time.Timer)
 	t.Reset(d)
 	defer func() {
 		t.Stop()
 		timerPool.Put(t)
+		c.L.Lock()
 	}()
-	defer c.L.Lock()
 	select {
-	case <-c.signal:
+	case <-ch:
 		return false
 	case <-t.C:
 		return true
@@ -79,5 +79,5 @@ func (c *Cond) WaitWithTimeout(d time.Duration) bool {
 
 // NewCond creates a Cond.
 func NewCond(lock sync.Locker) *Cond {
-	return &Cond{lock, make(chan bool, 1)}
+	return &Cond{lock, make(chan struct{})}
 }

@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs
@@ -34,11 +35,13 @@ import (
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/vfs"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var logger = utils.GetLogger("juicefs")
 
-const rotateAccessLog = 300 << 20 // 300 MiB
+var checkAccessFile = time.Minute
+var rotateAccessLog int64 = 300 << 20 // 300 MiB
 
 type Ino = meta.Ino
 type Attr = meta.Attr
@@ -94,7 +97,6 @@ func (fs *FileStat) Mode() os.FileMode {
 		mode |= os.ModeSymlink
 	case meta.TypeFile:
 	default:
-		mode = 0
 	}
 	return mode
 }
@@ -107,8 +109,8 @@ func (fs *FileStat) Sys() interface{} { return fs.attr }
 func (fs *FileStat) Uid() int         { return int(fs.attr.Uid) }
 func (fs *FileStat) Gid() int         { return int(fs.attr.Gid) }
 
-func (fs *FileStat) Atime() int64 { return int64(fs.attr.Atime*1000) + int64(fs.attr.Atimensec/1e6) }
-func (fs *FileStat) Mtime() int64 { return int64(fs.attr.Mtime*1000) + int64(fs.attr.Mtimensec/1e6) }
+func (fs *FileStat) Atime() int64 { return fs.attr.Atime*1000 + int64(fs.attr.Atimensec/1e6) }
+func (fs *FileStat) Mtime() int64 { return fs.attr.Mtime*1000 + int64(fs.attr.Mtimensec/1e6) }
 
 func AttrToFileInfo(inode Ino, attr *Attr) *FileStat {
 	return &FileStat{inode: inode, attr: attr}
@@ -136,6 +138,10 @@ type FileSystem struct {
 	attrs   map[Ino]*attrCache
 
 	logBuffer chan string
+
+	readSizeHistogram     prometheus.Histogram
+	writtenSizeHistogram  prometheus.Histogram
+	opsDurationsHistogram prometheus.Histogram
 }
 
 type File struct {
@@ -162,7 +168,24 @@ func NewFileSystem(conf *vfs.Config, m meta.Meta, d chunk.ChunkStore) (*FileSyst
 		writer:  vfs.NewDataWriter(conf, m, d, reader),
 		entries: make(map[meta.Ino]map[string]*entryCache),
 		attrs:   make(map[meta.Ino]*attrCache),
+
+		readSizeHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "sdk_read_size_bytes",
+			Help:    "size of read distributions.",
+			Buckets: prometheus.LinearBuckets(4096, 4096, 32),
+		}),
+		writtenSizeHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "sdk_written_size_bytes",
+			Help:    "size of write distributions.",
+			Buckets: prometheus.LinearBuckets(4096, 4096, 32),
+		}),
+		opsDurationsHistogram: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "sdk_ops_durations_histogram_seconds",
+			Help:    "Operations latency distributions.",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 1.5, 30),
+		}),
 	}
+
 	go fs.cleanupCache()
 	if conf.AccessLog != "" {
 		f, err := os.OpenFile(conf.AccessLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -175,6 +198,14 @@ func NewFileSystem(conf *vfs.Config, m meta.Meta, d chunk.ChunkStore) (*FileSyst
 		}
 	}
 	return fs, nil
+}
+
+func (fs *FileSystem) InitMetrics(reg prometheus.Registerer) {
+	if reg != nil {
+		reg.MustRegister(fs.readSizeHistogram)
+		reg.MustRegister(fs.writtenSizeHistogram)
+		reg.MustRegister(fs.opsDurationsHistogram)
+	}
 }
 
 func (fs *FileSystem) cleanupCache() {
@@ -232,7 +263,7 @@ func (fs *FileSystem) invalidateAttr(ino Ino) {
 
 func (fs *FileSystem) log(ctx LogContext, format string, args ...interface{}) {
 	used := ctx.Duration()
-	opsDurationsHistogram.Observe(used.Seconds())
+	fs.opsDurationsHistogram.Observe(used.Seconds())
 	if fs.logBuffer == nil {
 		return
 	}
@@ -268,14 +299,14 @@ func (fs *FileSystem) flushLog(f *os.File, logBuffer chan string, path string) {
 			logger.Errorf("write access log: %s", err)
 			break
 		}
-		if lastcheck.Add(time.Minute).After(time.Now()) {
+		if lastcheck.Add(checkAccessFile).After(time.Now()) {
 			continue
 		}
 		lastcheck = time.Now()
 		var fi os.FileInfo
 		fi, err = f.Stat()
 		if err == nil && fi.Size() > rotateAccessLog {
-			f.Close()
+			_ = f.Close()
 			fi, err = os.Stat(path)
 			if err == nil && fi.Size() > rotateAccessLog {
 				tmp := fmt.Sprintf("%s.%p", path, fs)
@@ -378,6 +409,11 @@ func (fs *FileSystem) Stat(ctx meta.Context, path string) (fi *FileStat, err sys
 	return fs.resolve(ctx, path, false)
 }
 
+// parentDir returns parent of /foo/bar/ as /foo
+func parentDir(p string) string {
+	return path.Dir(strings.TrimRight(p, "/"))
+}
+
 func (fs *FileSystem) Mkdir(ctx meta.Context, p string, mode uint16) (err syscall.Errno) {
 	defer trace.StartRegion(context.TODO(), "fs.Mkdir").End()
 	l := vfs.NewLogContext(ctx)
@@ -385,7 +421,7 @@ func (fs *FileSystem) Mkdir(ctx meta.Context, p string, mode uint16) (err syscal
 	if p == "/" {
 		return syscall.EEXIST
 	}
-	fi, err := fs.resolve(ctx, path.Dir(p), true)
+	fi, err := fs.resolve(ctx, parentDir(p), true)
 	if err != 0 {
 		return err
 	}
@@ -403,7 +439,7 @@ func (fs *FileSystem) Delete(ctx meta.Context, p string) (err syscall.Errno) {
 	defer trace.StartRegion(context.TODO(), "fs.Delete").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Delete (%s): %s", p, errstr(err)) }()
-	parent, err := fs.resolve(ctx, path.Dir(p), true)
+	parent, err := fs.resolve(ctx, parentDir(p), true)
 	if err != 0 {
 		return
 	}
@@ -428,11 +464,11 @@ func (fs *FileSystem) Rmr(ctx meta.Context, p string) (err syscall.Errno) {
 	defer trace.StartRegion(context.TODO(), "fs.Rmr").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Rmr (%s): %s", p, errstr(err)) }()
-	parent, err := fs.resolve(ctx, path.Dir(p), true)
+	parent, err := fs.resolve(ctx, parentDir(p), true)
 	if err != 0 {
 		return
 	}
-	err = meta.Remove(fs.m, ctx, parent.inode, path.Base(p))
+	err = fs.m.Remove(ctx, parent.inode, path.Base(p), nil)
 	fs.invalidateEntry(parent.inode, path.Base(p))
 	return
 }
@@ -441,7 +477,7 @@ func (fs *FileSystem) Rename(ctx meta.Context, oldpath string, newpath string, f
 	defer trace.StartRegion(context.TODO(), "fs.Rename").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Rename (%s,%s,%d): %s", oldpath, newpath, flags, errstr(err)) }()
-	oldfi, err := fs.resolve(ctx, path.Dir(oldpath), true)
+	oldfi, err := fs.resolve(ctx, parentDir(oldpath), true)
 	if err != 0 {
 		return
 	}
@@ -449,7 +485,7 @@ func (fs *FileSystem) Rename(ctx meta.Context, oldpath string, newpath string, f
 	if err != 0 {
 		return
 	}
-	newfi, err := fs.resolve(ctx, path.Dir(newpath), true)
+	newfi, err := fs.resolve(ctx, parentDir(newpath), true)
 	if err != 0 {
 		return
 	}
@@ -467,11 +503,14 @@ func (fs *FileSystem) Symlink(ctx meta.Context, target string, link string) (err
 	defer trace.StartRegion(context.TODO(), "fs.Symlink").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Symlink (%s,%s): %s", target, link, errstr(err)) }()
-	fi, err := fs.resolve(ctx, path.Dir(link), true)
+	if strings.HasSuffix(link, "/") {
+		return syscall.EINVAL
+	}
+	fi, err := fs.resolve(ctx, parentDir(link), true)
 	if err != 0 {
 		return
 	}
-	rel, e := filepath.Rel(path.Dir(link), target)
+	rel, e := filepath.Rel(parentDir(link), target)
 	if e != nil {
 		// external link
 		rel = target
@@ -691,13 +730,16 @@ func (fs *FileSystem) resolve(ctx meta.Context, p string, followLastSymlink bool
 		if len(name) == 0 {
 			continue
 		}
-		if parent == 1 && i == len(ss)-1 && vfs.IsSpecialName(name) {
+		if parent == meta.RootInode && i == len(ss)-1 && vfs.IsSpecialName(name) {
 			inode, attr := vfs.GetInternalNodeByName(name)
 			fi = AttrToFileInfo(inode, attr)
 			parent = inode
 			break
 		}
 		if i > 0 {
+			if (name == "." || name == "..") && attr.Typ != meta.TypeDirectory {
+				return nil, syscall.ENOTDIR
+			}
 			if err := fs.m.Access(ctx, parent, mMaskX, attr); err != 0 {
 				return nil, err
 			}
@@ -731,10 +773,11 @@ func (fs *FileSystem) resolve(ctx meta.Context, p string, followLastSymlink bool
 				return
 			}
 			inode = fi.Inode()
+			attr = fi.attr
 		}
 		parent = inode
 	}
-	if parent == 1 {
+	if parent == meta.RootInode {
 		err = fs.m.GetAttr(ctx, parent, attr)
 		if err != 0 {
 			return
@@ -748,10 +791,13 @@ func (fs *FileSystem) Create(ctx meta.Context, p string, mode uint16) (f *File, 
 	defer trace.StartRegion(context.TODO(), "fs.Create").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() { fs.log(l, "Create (%s,%o): %s", p, mode, errstr(err)) }()
+	if strings.HasSuffix(p, "/") {
+		return nil, syscall.EINVAL
+	}
 	var inode Ino
 	var attr = &Attr{}
 	var fi *FileStat
-	fi, err = fs.resolve(ctx, path.Dir(p), true)
+	fi, err = fs.resolve(ctx, parentDir(p), true)
 	if err != 0 {
 		return
 	}
@@ -783,7 +829,7 @@ func (fs *FileSystem) Flush() error {
 }
 
 func (fs *FileSystem) Close() error {
-	fs.Flush()
+	_ = fs.Flush()
 	buffer := fs.logBuffer
 	if buffer != nil {
 		fs.logBuffer = nil
@@ -954,7 +1000,7 @@ func (f *File) pread(ctx meta.Context, b []byte, offset int64) (n int, err error
 	if got == 0 {
 		return 0, io.EOF
 	}
-	readSizeHistogram.Observe(float64(got))
+	f.fs.readSizeHistogram.Observe(float64(got))
 	return got, nil
 }
 
@@ -985,14 +1031,14 @@ func (f *File) pwrite(ctx meta.Context, b []byte, offset int64) (n int, err sysc
 	}
 	err = f.wdata.Write(ctx, uint64(offset), b)
 	if err != 0 {
-		f.wdata.Close(meta.Background)
+		_ = f.wdata.Close(meta.Background)
 		f.wdata = nil
 		return
 	}
 	if offset+int64(len(b)) > int64(f.info.attr.Length) {
 		f.info.attr.Length = uint64(offset + int64(len(b)))
 	}
-	writtenSizeHistogram.Observe(float64(len(b)))
+	f.fs.writtenSizeHistogram.Observe(float64(len(b)))
 	return len(b), 0
 }
 
@@ -1040,7 +1086,7 @@ func (f *File) Close(ctx meta.Context) (err syscall.Errno) {
 			err = f.wdata.Close(meta.Background)
 			f.wdata = nil
 		}
-		f.fs.m.Close(ctx, f.inode)
+		_ = f.fs.m.Close(ctx, f.inode)
 	}
 	return
 }
@@ -1061,7 +1107,8 @@ func (f *File) Readdir(ctx meta.Context, count int) (fi []os.FileInfo, err sysca
 		if err != 0 {
 			return
 		}
-		for _, n := range inodes {
+		// skip . and ..
+		for _, n := range inodes[2:] {
 			i := AttrToFileInfo(n.Inode, n.Attr)
 			i.name = string(n.Name)
 			fi = append(fi, i)
@@ -1110,13 +1157,13 @@ func (f *File) ReaddirPlus(ctx meta.Context, offset int) (entries []*meta.Entry,
 	return
 }
 
-func (f *File) Summary(ctx meta.Context, depth uint8, maxentries uint32) (s *meta.Summary, err syscall.Errno) {
+func (f *File) Summary(ctx meta.Context) (s *meta.Summary, err syscall.Errno) {
 	defer trace.StartRegion(context.TODO(), "fs.Summary").End()
 	l := vfs.NewLogContext(ctx)
 	defer func() {
 		f.fs.log(l, "Summary (%s): %s (%d,%d,%d,%d)", f.path, errstr(err), s.Length, s.Size, s.Files, s.Dirs)
 	}()
 	s = &meta.Summary{}
-	err = meta.GetSummary(f.fs.m, ctx, f.inode, s)
+	err = meta.GetSummary(f.fs.m, ctx, f.inode, s, true)
 	return
 }

@@ -1,18 +1,20 @@
+//go:build !nobos
 // +build !nobos
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -20,8 +22,10 @@ package object
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,6 +57,9 @@ func (q *bosclient) Create() error {
 func (q *bosclient) Head(key string) (Object, error) {
 	r, err := q.c.GetObjectMeta(q.bucket, key)
 	if err != nil {
+		if e, ok := err.(*bce.BceServiceError); ok && e.StatusCode == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 	mtime, _ := time.Parse(time.RFC1123, r.LastModified)
@@ -99,15 +106,19 @@ func (q *bosclient) Copy(dst, src string) error {
 }
 
 func (q *bosclient) Delete(key string) error {
-	return q.c.DeleteObject(q.bucket, key)
+	err := q.c.DeleteObject(q.bucket, key)
+	if err != nil && strings.Contains(err.Error(), "NoSuchKey") {
+		err = nil
+	}
+	return err
 }
 
-func (q *bosclient) List(prefix, marker string, limit int64) ([]Object, error) {
+func (q *bosclient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
 	limit_ := int(limit)
-	out, err := q.c.SimpleListObjects(q.bucket, prefix, limit_, marker, "")
+	out, err := q.c.SimpleListObjects(q.bucket, prefix, limit_, marker, delimiter)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +128,12 @@ func (q *bosclient) List(prefix, marker string, limit int64) ([]Object, error) {
 		k := out.Contents[i]
 		mod, _ := time.Parse("2006-01-02T15:04:05Z", k.LastModified)
 		objs[i] = &obj{k.Key, int64(k.Size), mod, strings.HasSuffix(k.Key, "/")}
+	}
+	if delimiter != "" {
+		for _, p := range out.CommonPrefixes {
+			objs = append(objs, &obj{p.Prefix, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -189,7 +206,10 @@ func autoBOSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
 	}
 }
 
-func newBOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newBOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)

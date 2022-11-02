@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -20,8 +21,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/pem"
 	"io/ioutil"
-	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -37,34 +39,70 @@ func TestRSA(t *testing.T) {
 	ciphertext, _ := c1.Encrypt([]byte("hello"))
 
 	privPEM := ExportRsaPrivateKeyToPem(testkey, "abc")
-	key2, _ := ParseRsaPrivateKeyFromPem(privPEM, "abc")
+	block, _ := pem.Decode([]byte(privPEM))
+	if block == nil {
+		t.Fatalf("failed to parse PEM block containing the key")
+	}
+
+	key2, _ := ParseRsaPrivateKeyFromPem(block, "abc")
 	c2 := NewRSAEncryptor(key2)
 	plaintext, _ := c2.Decrypt(ciphertext)
 	if string(plaintext) != "hello" {
 		t.Fail()
 	}
 
-	_, err := ParseRsaPrivateKeyFromPem(privPEM, "")
+	_, err := ParseRsaPrivateKeyFromPem(block, "")
 	if err == nil {
 		t.Errorf("parse without passphrase should fail")
 		t.Fail()
 	}
-	_, err = ParseRsaPrivateKeyFromPem(privPEM, "ab")
-	if err != x509.IncorrectPasswordError {
-		t.Errorf("parse without passphrase should return IncorrectPasswordError")
+	_, err = ParseRsaPrivateKeyFromPem(block, "ab")
+	if err == nil {
+		t.Errorf("parse with incorrect passphrase should return fail")
 		t.Fail()
 	}
 
-	_ = exec.Command("openssl", "genrsa", "-out", "/tmp/private.pem", "2048").Run()
-	if _, err = ParseRsaPrivateKeyFromPath("/tmp/private.pem", ""); err != nil {
+	dir := t.TempDir()
+
+	if err := genrsa(filepath.Join(dir, "private.pem"), ""); err != nil {
 		t.Error(err)
 		t.Fail()
 	}
-	_ = exec.Command("openssl", "genrsa", "-out", "/tmp/private.pem", "-aes256", "-passout", "pass:abcd", "2048").Run()
-	if _, err = ParseRsaPrivateKeyFromPath("/tmp/private.pem", "abcd"); err != nil {
+	if _, err = ParseRsaPrivateKeyFromPath(filepath.Join(dir, "private.pem"), ""); err != nil {
 		t.Error(err)
 		t.Fail()
 	}
+
+	if err := genrsa(filepath.Join(dir, "private.pem"), "abcd"); err != nil {
+		t.Error(err)
+		t.Fail()
+	}
+	if _, err = ParseRsaPrivateKeyFromPath(filepath.Join(dir, "private.pem"), "abcd"); err != nil {
+		t.Error(err)
+		t.Fail()
+	}
+}
+
+func genrsa(path string, password string) error {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+	block := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}
+	if password != "" {
+		// nolint:staticcheck
+		block, err = x509.EncryptPEMBlock(rand.Reader, block.Type, block.Bytes, []byte(password), x509.PEMCipherAES256)
+		if err != nil {
+			return err
+		}
+	}
+	if err := ioutil.WriteFile(path, pem.EncodeToMemory(block), 0755); err != nil {
+		return err
+	}
+	return nil
 }
 
 func BenchmarkRSA4096Encrypt(b *testing.B) {
@@ -86,9 +124,21 @@ func BenchmarkRSA4096Decrypt(b *testing.B) {
 	}
 }
 
+func TestChaCha20(t *testing.T) {
+	kc := NewRSAEncryptor(testkey)
+	dc, _ := NewDataEncryptor(kc, CHACHA20_RSA)
+	data := []byte("hello")
+	ciphertext, _ := dc.Encrypt(data)
+	plaintext, _ := dc.Decrypt(ciphertext)
+	if !bytes.Equal(data, plaintext) {
+		t.Errorf("decrypt fail")
+		t.Fail()
+	}
+}
+
 func TestAESGCM(t *testing.T) {
 	kc := NewRSAEncryptor(testkey)
-	dc := NewAESEncryptor(kc)
+	dc, _ := NewDataEncryptor(kc, AES256GCM_RSA)
 	data := []byte("hello")
 	ciphertext, _ := dc.Encrypt(data)
 	plaintext, _ := dc.Decrypt(ciphertext)
@@ -99,9 +149,9 @@ func TestAESGCM(t *testing.T) {
 }
 
 func TestEncryptedStore(t *testing.T) {
-	s, _ := CreateStorage("mem", "", "", "")
+	s, _ := CreateStorage("mem", "", "", "", "")
 	kc := NewRSAEncryptor(testkey)
-	dc := NewAESEncryptor(kc)
+	dc, _ := NewDataEncryptor(kc, AES256GCM_RSA)
 	es := NewEncrypted(s, dc)
 	_ = es.Put("a", bytes.NewReader([]byte("hello")))
 	r, err := es.Get("a", 1, 2)

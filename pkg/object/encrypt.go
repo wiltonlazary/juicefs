@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -29,6 +30,8 @@ import (
 	"io"
 	"io/ioutil"
 	"strings"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type Encryptor interface {
@@ -59,19 +62,9 @@ func ExportRsaPrivateKeyToPem(key *rsa.PrivateKey, passphrase string) string {
 	return string(privPEM)
 }
 
-func ParseRsaPrivateKeyFromPem(privPEM string, passphrase string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return nil, errors.New("failed to parse PEM block containing the key")
-	}
-
+func ParseRsaPrivateKeyFromPem(block *pem.Block, passphrase string) (*rsa.PrivateKey, error) {
 	buf := block.Bytes
-	// nolint:staticcheck
-	if strings.Contains(block.Headers["Proc-Type"], "ENCRYPTED") &&
-		x509.IsEncryptedPEMBlock(block) {
-		if passphrase == "" {
-			return nil, fmt.Errorf("passphrase is required to private key")
-		}
+	if passphrase != "" {
 		var err error
 		// nolint:staticcheck
 		buf, err = x509.DecryptPEMBlock(block, []byte(passphrase))
@@ -81,8 +74,6 @@ func ParseRsaPrivateKeyFromPem(privPEM string, passphrase string) (*rsa.PrivateK
 			}
 			return nil, fmt.Errorf("cannot decode encrypted private keys: %v", err)
 		}
-	} else if passphrase != "" {
-		logger.Warningf("passphrase is not used, because private key is not encrypted")
 	}
 
 	priv, err := x509.ParsePKCS1PrivateKey(buf)
@@ -98,7 +89,19 @@ func ParseRsaPrivateKeyFromPath(path, passphrase string) (*rsa.PrivateKey, error
 	if err != nil {
 		return nil, err
 	}
-	return ParseRsaPrivateKeyFromPem(string(b), passphrase)
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, errors.New("failed to parse PEM block containing the key")
+	}
+	// nolint:staticcheck
+	if strings.Contains(block.Headers["Proc-Type"], "ENCRYPTED") && x509.IsEncryptedPEMBlock(block) {
+		if passphrase == "" {
+			return nil, fmt.Errorf("passphrase is required to private key, please try again after setting the 'JFS_RSA_PASSPHRASE' environment variable")
+		}
+	} else if passphrase != "" {
+		logger.Warningf("passphrase is not used, because private key is not encrypted")
+	}
+	return ParseRsaPrivateKeyFromPem(block, passphrase)
 }
 
 func NewRSAEncryptor(privKey *rsa.PrivateKey) Encryptor {
@@ -113,16 +116,35 @@ func (e *rsaEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	return rsa.DecryptOAEP(sha256.New(), rand.Reader, e.privKey, ciphertext, e.label)
 }
 
-type aesEncryptor struct {
+type dataEncryptor struct {
 	keyEncryptor Encryptor
 	keyLen       int
+	aead         func(key []byte) (cipher.AEAD, error)
 }
 
-func NewAESEncryptor(keyEncryptor Encryptor) Encryptor {
-	return &aesEncryptor{keyEncryptor, 32} //  AES-256-GCM
+const (
+	AES256GCM_RSA = "aes256gcm-rsa"
+	CHACHA20_RSA  = "chacha20-rsa"
+)
+
+func NewDataEncryptor(keyEncryptor Encryptor, algo string) (Encryptor, error) {
+	switch algo {
+	case "", AES256GCM_RSA:
+		aead := func(key []byte) (cipher.AEAD, error) {
+			block, err := aes.NewCipher(key)
+			if err != nil {
+				return nil, err
+			}
+			return cipher.NewGCM(block)
+		}
+		return &dataEncryptor{keyEncryptor, 32, aead}, nil
+	case CHACHA20_RSA:
+		return &dataEncryptor{keyEncryptor, chacha20poly1305.KeySize, chacha20poly1305.New}, nil
+	}
+	return nil, fmt.Errorf("unsupport cipher: %s", algo)
 }
 
-func (e *aesEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
+func (e *dataEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	key := make([]byte, e.keyLen)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, err
@@ -131,21 +153,17 @@ func (e *aesEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(key)
+	aead, err := e.aead(key)
 	if err != nil {
 		return nil, err
 	}
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, aesgcm.NonceSize())
+	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
 
 	headerSize := 3 + len(cipherkey) + len(nonce)
-	buf := make([]byte, headerSize+len(plaintext)+aesgcm.Overhead())
+	buf := make([]byte, headerSize+len(plaintext)+aead.Overhead())
 	buf[0] = byte(len(cipherkey) >> 8)
 	buf[1] = byte(len(cipherkey) & 0xFF)
 	buf[2] = byte(len(nonce))
@@ -154,11 +172,11 @@ func (e *aesEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 	p = p[len(cipherkey):]
 	copy(p, nonce)
 	p = p[len(nonce):]
-	ciphertext := aesgcm.Seal(p[:0], nonce, plaintext, nil)
+	ciphertext := aead.Seal(p[:0], nonce, plaintext, nil)
 	return buf[:headerSize+len(ciphertext)], nil
 }
 
-func (e *aesEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
+func (e *dataEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	keyLen := int(ciphertext[0])<<8 + int(ciphertext[1])
 	nonceLen := int(ciphertext[2])
 	if 3+keyLen+nonceLen >= len(ciphertext) {
@@ -173,15 +191,11 @@ func (e *aesEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("decryt key: " + err.Error())
 	}
-	block, err := aes.NewCipher(key)
+	aead, err := e.aead(key)
 	if err != nil {
 		return nil, err
 	}
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return aesgcm.Open(ciphertext[:0], nonce, ciphertext, nil)
+	return aead.Open(ciphertext[:0], nonce, ciphertext, nil)
 }
 
 type encrypted struct {
@@ -214,7 +228,7 @@ func (e *encrypted) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	}
 	l := int64(len(plain))
 	if off > l {
-		return nil, io.EOF
+		off = l
 	}
 	if limit == -1 || off+limit > l {
 		limit = l - off

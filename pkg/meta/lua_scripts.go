@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 //nolint
@@ -19,10 +20,14 @@ package meta
 const scriptLookup = `
 local buf = redis.call('HGET', KEYS[1], KEYS[2])
 if not buf then
-       return false
+    error("ENOENT")
 end
 local ino = struct.unpack(">I8", string.sub(buf, 2))
-return {ino, redis.call('GET', "i" .. tostring(ino))}
+-- double float has 52 significant bits
+if ino > 4503599627370495 then
+    error("ENOTSUP")
+end
+return {ino, redis.call('GET', "i" .. string.format("%.f", ino))}
 `
 
 const scriptResolve = `
@@ -35,7 +40,7 @@ local function unpack_attr(buf)
 end
 
 local function get_attr(ino)
-    local encoded_attr = redis.call('GET', "i" .. tostring(ino))
+    local encoded_attr = redis.call('GET', "i" .. string.format("%.f", ino))
     if not encoded_attr then
         error("ENOENT")
     end
@@ -43,7 +48,7 @@ local function get_attr(ino)
 end
 
 local function lookup(parent, name)
-    local buf = redis.call('HGET', "d" .. tostring(parent), name)
+    local buf = redis.call('HGET', "d" .. string.format("%.f", parent), name)
     if not buf then
         error("ENOENT")
     end
@@ -68,9 +73,10 @@ local function can_access(ino, uid, gid)
 end
 
 local function resolve(parent, path, uid, gid)
+    local _maxIno = 4503599627370495
     local _type = 2
     for name in string.gmatch(path, "[^/]+") do
-        if _type == 3 then
+        if _type == 3 or parent > _maxIno then
             error("ENOTSUP")
         elseif _type ~= 2 then
             error("ENOTDIR")
@@ -79,7 +85,10 @@ local function resolve(parent, path, uid, gid)
         end
         _type, parent = lookup(parent, name)
     end
-    return {parent, redis.call('GET', "i" .. tostring(parent))}
+    if parent > _maxIno then
+        error("ENOTSUP")
+    end
+    return {parent, redis.call('GET', "i" .. string.format("%.f", parent))}
 end
 
 return resolve(tonumber(KEYS[1]), KEYS[2], tonumber(KEYS[3]), tonumber(KEYS[4]))

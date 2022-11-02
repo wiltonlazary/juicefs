@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -20,7 +21,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -78,6 +78,10 @@ func init() {
 		},
 		Timeout: time.Hour,
 	}
+}
+
+func GetHttpClient() *http.Client {
+	return httpClient
 }
 
 func cleanup(response *http.Response) {
@@ -154,6 +158,9 @@ func (s *RestfulStorage) Head(key string) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, os.ErrNotExist
+	}
 	defer cleanup(resp)
 	if resp.StatusCode != 200 {
 		return nil, parseError(resp)
@@ -228,8 +235,8 @@ func (s *RestfulStorage) Delete(key string) error {
 	return nil
 }
 
-func (s *RestfulStorage) List(prefix, marker string, limit int64) ([]Object, error) {
-	return nil, errors.New("Not implemented")
+func (s *RestfulStorage) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+	return nil, notSupported
 }
 
 var _ ObjectStorage = &RestfulStorage{}

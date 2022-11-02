@@ -1,35 +1,42 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package meta
 
 import (
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/version"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
+	// MaxVersion is the max of supported versions.
+	MaxVersion = 1
 	// ChunkSize is size of a chunk
 	ChunkSize = 1 << 26 // 64M
-	// DeleteChunk is a message to delete a chunk from object store.
-	DeleteChunk = 1000
+	// DeleteSlice is a message to delete a slice from object store.
+	DeleteSlice = 1000
 	// CompactChunk is a message to compact a chunk in object store.
 	CompactChunk = 1001
 	// Rmr is a message to remove a directory recursively.
@@ -67,14 +74,37 @@ const (
 	SetAttrCtime
 	SetAttrAtimeNow
 	SetAttrMtimeNow
+	SetAttrFlag = 1 << 15
 )
+
+const (
+	FlagImmutable = 1 << iota
+	FlagAppend
+)
+
+const MaxName = 255
+const RootInode Ino = 1
+const TrashInode Ino = 0x7FFFFFFF10000000 // larger than vfs.minInternalNode
+const TrashName = ".trash"
+
+func isTrash(ino Ino) bool {
+	return ino >= TrashInode
+}
+
+type internalNode struct {
+	inode Ino
+	name  string
+}
+
+// Type of control messages
+const CPROGRESS = 0xFE // 16 bytes: progress increment
 
 // MsgCallback is a callback for messages from meta service.
 type MsgCallback func(...interface{}) error
 
 // Attr represents attributes of a node.
 type Attr struct {
-	Flags     uint8  // reserved flags
+	Flags     uint8  // flags
 	Typ       uint8  // type of a node
 	Mode      uint16 // permission mode
 	Uid       uint32 // owner id
@@ -89,7 +119,7 @@ type Attr struct {
 	Nlink     uint32 // number of links (sub-directories or hardlinks)
 	Length    uint64 // length of regular file
 
-	Parent    Ino  // inode of parent, only for Directory
+	Parent    Ino  // inode of parent; 0 means tracked by parentKey (for hardlinks)
 	Full      bool // the attributes are completed or not
 	KeepCache bool // whether to keep the cached page or not
 }
@@ -172,10 +202,10 @@ type Entry struct {
 // Slice is a slice of a chunk.
 // Multiple slices could be combined together as a chunk.
 type Slice struct {
-	Chunkid uint64
-	Size    uint32
-	Off     uint32
-	Len     uint32
+	Id   uint64
+	Size uint32
+	Off  uint32
+	Len  uint32
 }
 
 // Summary represents the total number of files/directories and
@@ -189,7 +219,7 @@ type Summary struct {
 
 type SessionInfo struct {
 	Version    string
-	Hostname   string
+	HostName   string
 	MountPoint string
 	ProcessID  int
 }
@@ -203,13 +233,13 @@ type Flock struct {
 type Plock struct {
 	Inode   Ino
 	Owner   uint64
-	Records []byte // FIXME: loadLocks
+	Records []plockRecord
 }
 
 // Session contains detailed information of a client session
 type Session struct {
-	Sid       uint64
-	Heartbeat time.Time
+	Sid    uint64
+	Expire time.Time
 	SessionInfo
 	Sustained []Ino   `json:",omitempty"`
 	Flocks    []Flock `json:",omitempty"`
@@ -222,16 +252,22 @@ type Meta interface {
 	Name() string
 	// Init is used to initialize a meta service.
 	Init(format Format, force bool) error
+	// Shutdown close current database connections.
+	Shutdown() error
+	// Reset cleans up all metadata, VERY DANGEROUS!
+	Reset() error
 	// Load loads the existing setting of a formatted volume from meta service.
-	Load() (*Format, error)
+	Load(checkVersion bool) (*Format, error)
 	// NewSession creates a new client session.
 	NewSession() error
 	// CloseSession does cleanup and close the session.
 	CloseSession() error
 	// GetSession retrieves information of session with sid
-	GetSession(sid uint64) (*Session, error)
+	GetSession(sid uint64, detail bool) (*Session, error)
 	// ListSessions returns all client sessions.
 	ListSessions() ([]*Session, error)
+	// CleanStaleSessions cleans up sessions not active for more than 5 minutes
+	CleanStaleSessions()
 
 	// StatFS returns summary statistics of a volume.
 	StatFS(ctx Context, totalspace, availspace, iused, iavail *uint64) syscall.Errno
@@ -256,7 +292,7 @@ type Meta interface {
 	// Symlink creates a symlink in a directory with given name.
 	Symlink(ctx Context, parent Ino, name string, path string, inode *Ino, attr *Attr) syscall.Errno
 	// Mknod creates a node in a directory with given name, type and permissions.
-	Mknod(ctx Context, parent Ino, name string, _type uint8, mode uint16, cumask uint16, rdev uint32, inode *Ino, attr *Attr) syscall.Errno
+	Mknod(ctx Context, parent Ino, name string, _type uint8, mode uint16, cumask uint16, rdev uint32, path string, inode *Ino, attr *Attr) syscall.Errno
 	// Mkdir creates a sub-directory with given name and mode.
 	Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *Ino, attr *Attr) syscall.Errno
 	// Unlink removes a file entry from a directory.
@@ -279,15 +315,17 @@ type Meta interface {
 	// Close a file.
 	Close(ctx Context, inode Ino) syscall.Errno
 	// Read returns the list of slices on the given chunk.
-	Read(ctx Context, inode Ino, indx uint32, chunks *[]Slice) syscall.Errno
-	// NewChunk returns a new id for new data.
-	NewChunk(ctx Context, inode Ino, indx uint32, offset uint32, chunkid *uint64) syscall.Errno
+	Read(ctx Context, inode Ino, indx uint32, slices *[]Slice) syscall.Errno
+	// NewSlice returns an id for new slice.
+	NewSlice(ctx Context, id *uint64) syscall.Errno
 	// Write put a slice of data on top of the given chunk.
 	Write(ctx Context, inode Ino, indx uint32, off uint32, slice Slice) syscall.Errno
 	// InvalidateChunkCache invalidate chunk cache
 	InvalidateChunkCache(ctx Context, inode Ino, indx uint32) syscall.Errno
 	// CopyFileRange copies part of a file to another one.
 	CopyFileRange(ctx Context, fin Ino, offIn uint64, fout Ino, offOut uint64, size uint64, flags uint32, copied *uint64) syscall.Errno
+	// GetParents returns a map of node parents (> 1 parents if hardlinked)
+	GetParents(ctx Context, inode Ino) map[Ino]int
 
 	// GetXattr returns the value of extended attribute for given name.
 	GetXattr(ctx Context, inode Ino, name string, vbuff *[]byte) syscall.Errno
@@ -305,28 +343,26 @@ type Meta interface {
 	Setlk(ctx Context, inode Ino, owner uint64, block bool, ltype uint32, start, end uint64, pid uint32) syscall.Errno
 
 	// Compact all the chunks by merge small slices together
-	CompactAll(ctx Context) syscall.Errno
+	CompactAll(ctx Context, bar *utils.Bar) syscall.Errno
 	// ListSlices returns all slices used by all files.
-	ListSlices(ctx Context, slices *[]Slice, delete bool, showProgress func()) syscall.Errno
+	ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, showProgress func()) syscall.Errno
+	// Remove all files and directories recursively.
+	Remove(ctx Context, parent Ino, name string, count *uint64) syscall.Errno
+	// GetPaths returns all paths of an inode
+	GetPaths(ctx Context, inode Ino) []string
+	// Check integrity of an absolute path and repair it if asked
+	Check(ctx Context, fpath string, repair bool, recursive bool) syscall.Errno
 
 	// OnMsg add a callback for the given message type.
 	OnMsg(mtype uint32, cb MsgCallback)
 
-	DumpMeta(w io.Writer) error
+	// Dump the tree under root, which may be modified by checkRoot
+	DumpMeta(w io.Writer, root Ino, keepSecret bool) error
 	LoadMeta(r io.Reader) error
-}
 
-func removePassword(uri string) string {
-	p := strings.Index(uri, "@")
-	if p < 0 {
-		return uri
-	}
-	sp := strings.Index(uri, "://")
-	cp := strings.Index(uri[sp+3:], ":")
-	if cp < 0 || sp+3+cp > p {
-		return uri
-	}
-	return uri[:sp+3+cp] + uri[p:]
+	// getBase return the base engine.
+	getBase() *baseMeta
+	InitMetrics(registerer prometheus.Registerer)
 }
 
 type Creator func(driver, addr string, conf *Config) (Meta, error)
@@ -337,30 +373,49 @@ func Register(name string, register Creator) {
 	metaDrivers[name] = register
 }
 
+func setPasswordFromEnv(uri string) (string, error) {
+	atIndex := strings.Index(uri, "@")
+	if atIndex == -1 {
+		return "", fmt.Errorf("invalid uri: %s", uri)
+	}
+	dIndex := strings.Index(uri, "://") + 3
+	s := strings.Split(uri[dIndex:atIndex], ":")
+
+	if len(s) > 2 {
+		return "", fmt.Errorf("invalid uri: %s", uri)
+	}
+
+	if len(s) == 2 && s[1] != "" {
+		return uri, nil
+	}
+	pwd := url.UserPassword("", os.Getenv("META_PASSWORD")) // escape only password
+	return uri[:dIndex] + s[0] + pwd.String() + uri[atIndex:], nil
+}
+
 // NewClient creates a Meta client for given uri.
 func NewClient(uri string, conf *Config) Meta {
+	var err error
 	if !strings.Contains(uri, "://") {
 		uri = "redis://" + uri
-	}
-	logger.Infof("Meta address: %s", removePassword(uri))
-	if os.Getenv("META_PASSWORD") != "" {
-		p := strings.Index(uri, ":@")
-		if p > 0 {
-			uri = uri[:p+1] + os.Getenv("META_PASSWORD") + uri[p+1:]
-		}
 	}
 	p := strings.Index(uri, "://")
 	if p < 0 {
 		logger.Fatalf("invalid uri: %s", uri)
 	}
 	driver := uri[:p]
+	if os.Getenv("META_PASSWORD") != "" && (driver == "mysql" || driver == "postgres") {
+		if uri, err = setPasswordFromEnv(uri); err != nil {
+			logger.Fatalf(err.Error())
+		}
+	}
+	logger.Infof("Meta address: %s", utils.RemovePassword(uri))
 	f, ok := metaDrivers[driver]
 	if !ok {
 		logger.Fatalf("Invalid meta driver: %s", driver)
 	}
 	m, err := f(driver, uri[p+3:], conf)
 	if err != nil {
-		logger.Fatalf("Meta is not available: %s", err)
+		logger.Fatalf("Meta %s is not available: %s", uri, err)
 	}
 	return m
 }
@@ -371,9 +426,5 @@ func newSessionInfo() *SessionInfo {
 		logger.Warnf("Failed to get hostname: %s", err)
 		host = ""
 	}
-	return &SessionInfo{Version: version.Version(), Hostname: host, ProcessID: os.Getpid()}
-}
-
-func timeit(start time.Time) {
-	opDist.Observe(time.Since(start).Seconds())
+	return &SessionInfo{Version: version.Version(), HostName: host, ProcessID: os.Getpid()}
 }

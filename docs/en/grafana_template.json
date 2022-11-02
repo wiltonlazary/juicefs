@@ -16,7 +16,7 @@
   "gnetId": null,
   "graphTooltip": 0,
   "id": 16,
-  "iteration": 1616378184198,
+  "iteration": 1640078675219,
   "links": [],
   "panels": [
     {
@@ -24,10 +24,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
+      "description": "",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "bytes"
         },
         "overrides": []
@@ -58,7 +58,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -68,6 +68,7 @@
       "steppedLine": false,
       "targets": [
         {
+          "exemplar": true,
           "expr": "avg(juicefs_used_space{vol_name=\"$name\"})",
           "format": "time_series",
           "instant": false,
@@ -83,7 +84,7 @@
       "timeShift": null,
       "title": "Data Size",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -123,10 +124,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
+      "description": "",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "none"
         },
         "overrides": []
@@ -157,7 +158,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -167,6 +168,7 @@
       "steppedLine": false,
       "targets": [
         {
+          "exemplar": true,
           "expr": "avg(juicefs_used_inodes{vol_name=\"$name\"})",
           "format": "time_series",
           "interval": "",
@@ -181,105 +183,7 @@
       "timeShift": null,
       "title": "Files",
       "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "unit": "none"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 0
-      },
-      "hiddenSeries": false,
-      "id": 5,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "count(juicefs_uptime{vol_name=\"$name\"})",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "Sessions",
-          "refId": "A"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Client Sessions",
-      "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -319,15 +223,107 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "color": {},
-          "custom": {},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": []
-          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "hiddenSeries": false,
+      "id": 5,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "count(juicefs_uptime{vol_name=\"$name\"})",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "Sessions",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Client Sessions",
+      "tooltip": {
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "none",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
           "unit": "short"
         },
         "overrides": []
@@ -359,7 +355,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -369,11 +365,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_fuse_ops_durations_histogram_seconds_count{vol_name=\"$name\"}[1m]) < 5000000000) by (node)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_fuse_ops_durations_histogram_seconds_count{vol_name=\"$name\"}[1m]) < 5000000000) by (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "Write {{node}}",
+          "legendFormat": "Ops {{instance}}",
           "refId": "A"
         }
       ],
@@ -383,7 +380,7 @@
       "timeShift": null,
       "title": "Operations",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -423,15 +420,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
+      "description": "",
       "fieldConfig": {
         "defaults": {
-          "color": {},
-          "custom": {},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": []
-          },
           "unit": "binBps"
         },
         "overrides": []
@@ -462,7 +454,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -472,21 +464,22 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_fuse_written_size_bytes_sum{vol_name=\"$name\"}[1m]) < 5000000000) by (node)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_fuse_written_size_bytes_sum{vol_name=\"$name\"}[1m]) < 5000000000) by (instance)",
           "format": "time_series",
           "instant": false,
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "Write {{node}}",
+          "legendFormat": "Write {{instance}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(juicefs_fuse_read_size_bytes_sum{vol_name=\"$name\"}[1m]) < 5000000000) by (node)",
+          "expr": "sum(rate(juicefs_fuse_read_size_bytes_sum{vol_name=\"$name\"}[1m]) < 5000000000) by (instance)",
           "format": "time_series",
           "hide": false,
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "Read {{node}}",
+          "legendFormat": "Read {{instance}}",
           "refId": "B"
         }
       ],
@@ -496,7 +489,7 @@
       "timeShift": null,
       "title": "IO Throughput",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -510,7 +503,7 @@
       },
       "yaxes": [
         {
-          "format": "Bps",
+          "format": "binBps",
           "label": null,
           "logBase": 1,
           "max": null,
@@ -537,15 +530,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "color": {},
-          "custom": {},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": []
-          },
           "unit": "µs"
         },
         "overrides": []
@@ -576,7 +563,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -586,12 +573,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_fuse_ops_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (node,mp) * 1000000 / sum(rate(juicefs_fuse_ops_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (node,mp)",
+          "expr": "sum(rate(juicefs_fuse_ops_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (instance,mp) * 1000000 / sum(rate(juicefs_fuse_ops_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (instance,mp)",
           "format": "time_series",
           "hide": false,
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -601,7 +588,7 @@
       "timeShift": null,
       "title": "IO Latency",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -641,10 +628,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "short"
         },
         "overrides": []
@@ -675,7 +661,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -685,11 +671,11 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_transaction_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (node)",
+          "expr": "sum(rate(juicefs_transaction_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
@@ -699,7 +685,7 @@
       "timeShift": null,
       "title": "Transcations",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -739,10 +725,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "µs"
         },
         "overrides": []
@@ -773,7 +758,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -783,11 +768,11 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_transaction_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (node,mp) * 1000000 / sum(rate(juicefs_transaction_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (node,mp)",
+          "expr": "sum(rate(juicefs_transaction_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (instance,mp) * 1000000 / sum(rate(juicefs_transaction_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (instance,mp)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -797,7 +782,7 @@
       "timeShift": null,
       "title": "Transcation Latency",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -837,14 +822,16 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fill": 1,
+      "fillGradient": 0,
       "gridPos": {
         "h": 6,
         "w": 8,
         "x": 16,
         "y": 12
       },
+      "hiddenSeries": false,
       "id": 20,
       "legend": {
         "avg": false,
@@ -859,7 +846,11 @@
       "linewidth": 1,
       "links": [],
       "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
       "percentage": false,
+      "pluginVersion": "8.0.6",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -869,19 +860,20 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_transaction_restart{vol_name=~\"$name\"}[1m])) by (node)",
+          "expr": "sum(rate(juicefs_transaction_restart{vol_name=~\"$name\"}[1m])) by (instance)",
           "format": "time_series",
           "intervalFactor": 1,
-          "legendFormat": "Restarts {{node}}",
+          "legendFormat": "Restarts {{instance}}",
           "refId": "A"
         }
       ],
       "thresholds": [],
       "timeFrom": null,
+      "timeRegions": [],
       "timeShift": null,
       "title": "Transaction Restarts",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -921,10 +913,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {}
+          "unit": "short"
         },
         "overrides": []
       },
@@ -954,7 +946,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -972,8 +964,10 @@
           "refId": "A"
         },
         {
+          "exemplar": true,
           "expr": "sum(rate(juicefs_object_request_errors{vol_name=\"$name\"}[1m])) ",
           "format": "time_series",
+          "interval": "",
           "intervalFactor": 1,
           "legendFormat": "errors",
           "refId": "B"
@@ -985,7 +979,7 @@
       "timeShift": null,
       "title": "Objects Requests",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -1025,13 +1019,7 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {}
-        },
-        "overrides": []
-      },
+      "datasource": "$datasource",
       "fill": 1,
       "fillGradient": 0,
       "gridPos": {
@@ -1058,7 +1046,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1068,19 +1056,31 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_object_request_data_bytes{method=\"PUT\",vol_name=\"$name\"}[1m])) by  (node,method)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_object_request_data_bytes{method=\"PUT\",vol_name=\"$name\"}[1m])) by  (instance,method)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{method}} {{node}}",
+          "legendFormat": "{{method}} {{instance}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(juicefs_object_request_data_bytes{method=\"GET\",vol_name=\"$name\"}[1m])) by  (node,method)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_object_request_data_bytes{method=\"GET\",vol_name=\"$name\"}[1m])) by  (instance,method)",
           "format": "time_series",
+          "hide": false,
+          "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{method}} {{node}}",
+          "legendFormat": "{{method}} {{instance}}",
           "refId": "B"
+        },
+        {
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_object_request_data_bytes{method=\"GET\",vol_name=\"$name\"}[1m]))",
+          "hide": false,
+          "interval": "",
+          "legendFormat": "Total",
+          "refId": "C"
         }
       ],
       "thresholds": [],
@@ -1089,7 +1089,7 @@
       "timeShift": null,
       "title": "Objects Throughput",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -1103,6 +1103,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:145",
           "format": "Bps",
           "label": null,
           "logBase": 1,
@@ -1111,6 +1112,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:146",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1129,10 +1131,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "µs"
         },
         "overrides": []
@@ -1163,7 +1164,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1173,11 +1174,11 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_object_request_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (node) * 1000000 / sum(rate(juicefs_object_request_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (node)",
+          "expr": "sum(rate(juicefs_object_request_durations_histogram_seconds_sum{vol_name=\"$name\"}[1m])) by  (instance) * 1000000 / sum(rate(juicefs_object_request_durations_histogram_seconds_count{vol_name=\"$name\"}[1m])) by  (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
@@ -1187,7 +1188,7 @@
       "timeShift": null,
       "title": "Objects Latency",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -1227,10 +1228,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "percent"
         },
         "overrides": []
@@ -1262,7 +1262,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1272,11 +1272,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_cpu_usage{vol_name=\"$name\"}[1m])*100 < 1000) by (node,mp)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_cpu_usage{vol_name=\"$name\"}[1m])*100 < 1000) by (instance,mp)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -1286,7 +1287,514 @@
       "timeShift": null,
       "title": "Client CPU Usage",
       "tooltip": {
-        "shared": true,
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "$$hashKey": "object:137",
+          "format": "percent",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "$$hashKey": "object:138",
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "hiddenSeries": false,
+      "id": 11,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "sum(juicefs_memory{vol_name=\"$name\"}) by (instance,mp)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{instance}}:{{mp}}",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Client Memory Usage",
+      "tooltip": {
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "bytes",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "hiddenSeries": false,
+      "id": 21,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "expr": "sum(juicefs_go_goroutines) by (instance,mp)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{instance}}:{{mp}}",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Go threads",
+      "tooltip": {
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "none",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 30
+      },
+      "hiddenSeries": false,
+      "id": 22,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "sum(juicefs_blockcache_bytes{vol_name=\"$name\"}) by (instance,mp)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{instance}}:{{mp}}",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Block Cache Size",
+      "tooltip": {
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "bytes",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 30
+      },
+      "hiddenSeries": false,
+      "id": 23,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "sum(juicefs_blockcache_blocks{vol_name=\"$name\"}) by (instance,mp)",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "{{instance}}:{{mp}}",
+          "refId": "A"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Block Cache Count",
+      "tooltip": {
+        "shared": false,
+        "sort": 0,
+        "value_type": "individual"
+      },
+      "type": "graph",
+      "xaxis": {
+        "buckets": null,
+        "mode": "time",
+        "name": null,
+        "show": true,
+        "values": []
+      },
+      "yaxes": [
+        {
+          "format": "none",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        },
+        {
+          "format": "short",
+          "label": null,
+          "logBase": 1,
+          "max": null,
+          "min": null,
+          "show": true
+        }
+      ],
+      "yaxis": {
+        "align": false,
+        "alignLevel": null
+      }
+    },
+    {
+      "aliasColors": {},
+      "bars": false,
+      "dashLength": 10,
+      "dashes": false,
+      "datasource": "$datasource",
+      "description": "",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "fill": 1,
+      "fillGradient": 0,
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "hiddenSeries": false,
+      "id": 24,
+      "legend": {
+        "avg": false,
+        "current": true,
+        "max": false,
+        "min": false,
+        "show": true,
+        "total": false,
+        "values": true
+      },
+      "lines": true,
+      "linewidth": 1,
+      "links": [],
+      "nullPointMode": "null",
+      "options": {
+        "alertThreshold": true
+      },
+      "percentage": false,
+      "pluginVersion": "8.0.6",
+      "pointradius": 2,
+      "points": false,
+      "renderer": "flot",
+      "seriesOverrides": [],
+      "spaceLength": 10,
+      "stack": false,
+      "steppedLine": false,
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_blockcache_hits{vol_name=\"$name\"}[1m])) by (instance,mp) *100 / (sum(rate(juicefs_blockcache_hits{vol_name=\"$name\"}[1m])) by (instance,mp) + sum(rate(juicefs_blockcache_miss{vol_name=\"$name\"}[1m])) by (instance,mp))",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "Hits {{instance}}:{{mp}}",
+          "refId": "A"
+        },
+        {
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_blockcache_hit_bytes{vol_name=\"$name\"}[1m])) by (instance,mp) *100 / (sum(rate(juicefs_blockcache_hit_bytes{vol_name=\"$name\"}[1m])) by (instance,mp) + sum(rate(juicefs_blockcache_miss_bytes{vol_name=\"$name\"}[1m])) by (instance,mp))",
+          "format": "time_series",
+          "interval": "",
+          "intervalFactor": 1,
+          "legendFormat": "HitBytes {{instance}}:{{mp}}",
+          "refId": "B"
+        }
+      ],
+      "thresholds": [],
+      "timeFrom": null,
+      "timeRegions": [],
+      "timeShift": null,
+      "title": "Block Cache Hit Ratio",
+      "tooltip": {
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -1326,512 +1834,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
+      "description": "",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 24
-      },
-      "hiddenSeries": false,
-      "id": 11,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "links": [],
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "sum(juicefs_memory{vol_name=\"$name\"}) by (node,mp)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
-          "refId": "A"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Client Memory Usage",
-      "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "bytes",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 24
-      },
-      "hiddenSeries": false,
-      "id": 21,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "links": [],
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "sum(go_goroutines) by (node,mp)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
-          "refId": "A"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Go threads",
-      "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "none",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 30
-      },
-      "hiddenSeries": false,
-      "id": 22,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "links": [],
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "sum(juicefs_blockcache_bytes{vol_name=\"$name\"}) by (node,mp)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
-          "refId": "A"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Block Cache Size",
-      "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "decbytes",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 30
-      },
-      "hiddenSeries": false,
-      "id": 23,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "links": [],
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "sum(juicefs_blockcache_blocks{vol_name=\"$name\"}) by (node,mp)",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
-          "refId": "A"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Block Cache Count",
-      "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "fill": 1,
-      "fillGradient": 0,
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 30
-      },
-      "hiddenSeries": false,
-      "id": 24,
-      "legend": {
-        "avg": false,
-        "current": true,
-        "max": false,
-        "min": false,
-        "show": true,
-        "total": false,
-        "values": true
-      },
-      "lines": true,
-      "linewidth": 1,
-      "links": [],
-      "nullPointMode": "null",
-      "options": {
-        "alertThreshold": true
-      },
-      "percentage": false,
-      "pluginVersion": "7.4.2",
-      "pointradius": 2,
-      "points": false,
-      "renderer": "flot",
-      "seriesOverrides": [],
-      "spaceLength": 10,
-      "stack": false,
-      "steppedLine": false,
-      "targets": [
-        {
-          "expr": "sum(rate(juicefs_blockcache_hits{vol_name=\"$name\"}[1m])) by (node,mp) / (sum(rate(juicefs_blockcache_hits{vol_name=\"$name\"}[1m])) by (node,mp) + sum(rate(juicefs_blockcache_miss{vol_name=\"$name\"}[1m])) by (node,mp))",
-          "format": "time_series",
-          "interval": "",
-          "intervalFactor": 1,
-          "legendFormat": "Hits {{node}}:{{mp}}",
-          "refId": "A"
-        },
-        {
-          "expr": "sum(rate(juicefs_blockcache_hit_bytes{vol_name=\"$name\"}[1m])) by (node,mp) / (sum(rate(juicefs_blockcache_hit_bytes{vol_name=\"$name\"}[1m])) by (node,mp) + sum(rate(juicefs_blockcache_miss_bytes{vol_name=\"$name\"}[1m])) by (node,mp))",
-          "format": "time_series",
-          "intervalFactor": 1,
-          "legendFormat": "HitBytes {{node}}:{{mp}}",
-          "refId": "B"
-        }
-      ],
-      "thresholds": [],
-      "timeFrom": null,
-      "timeRegions": [],
-      "timeShift": null,
-      "title": "Block Cache Hitrate",
-      "tooltip": {
-        "shared": true,
-        "sort": 0,
-        "value_type": "individual"
-      },
-      "type": "graph",
-      "xaxis": {
-        "buckets": null,
-        "mode": "time",
-        "name": null,
-        "show": true,
-        "values": []
-      },
-      "yaxes": [
-        {
-          "format": "percentunit",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        },
-        {
-          "format": "short",
-          "label": null,
-          "logBase": 1,
-          "max": null,
-          "min": null,
-          "show": true
-        }
-      ],
-      "yaxis": {
-        "align": false,
-        "alignLevel": null
-      }
-    },
-    {
-      "aliasColors": {},
-      "bars": false,
-      "dashLength": 10,
-      "dashes": false,
-      "datasource": "$Source",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {},
           "unit": "percent"
         },
         "overrides": []
@@ -1863,7 +1869,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1873,11 +1879,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_compact_size_histogram_bytes_count{vol_name=\"$name\"}[1m])) by (node,mp)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_compact_size_histogram_bytes_count{vol_name=\"$name\"}[1m])) by (instance,mp)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -1887,7 +1894,7 @@
       "timeShift": null,
       "title": "Compaction",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -1901,7 +1908,8 @@
       },
       "yaxes": [
         {
-          "format": "short",
+          "$$hashKey": "object:1080",
+          "format": "percent",
           "label": null,
           "logBase": 1,
           "max": null,
@@ -1909,6 +1917,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:1081",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -1927,10 +1936,9 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
           "unit": "percent"
         },
         "overrides": []
@@ -1962,7 +1970,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1972,11 +1980,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(juicefs_compact_size_histogram_bytes_sum{vol_name=\"$name\"}[1m])) by (node,mp)",
+          "exemplar": true,
+          "expr": "sum(rate(juicefs_compact_size_histogram_bytes_sum{vol_name=\"$name\"}[1m])) by (instance,mp)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -1986,7 +1995,7 @@
       "timeShift": null,
       "title": "Compacted Data",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -2000,7 +2009,7 @@
       },
       "yaxes": [
         {
-          "format": "Bps",
+          "format": "percent",
           "label": null,
           "logBase": 1,
           "max": null,
@@ -2026,11 +2035,11 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
-      "datasource": "$Source",
+      "datasource": "$datasource",
+      "description": "",
       "fieldConfig": {
         "defaults": {
-          "custom": {},
-          "unit": "percent"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -2061,7 +2070,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "7.4.2",
+      "pluginVersion": "8.0.6",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -2071,11 +2080,12 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(juicefs_fuse_open_handlers{vol_name=\"$name\"}) by (node,mp)",
+          "exemplar": true,
+          "expr": "sum(juicefs_fuse_open_handlers{vol_name=\"$name\"}) by (instance,mp)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 1,
-          "legendFormat": "{{node}}:{{mp}}",
+          "legendFormat": "{{instance}}:{{mp}}",
           "refId": "A"
         }
       ],
@@ -2085,7 +2095,7 @@
       "timeShift": null,
       "title": "Open File Handlers",
       "tooltip": {
-        "shared": true,
+        "shared": false,
         "sort": 0,
         "value_type": "individual"
       },
@@ -2099,6 +2109,7 @@
       },
       "yaxes": [
         {
+          "$$hashKey": "object:921",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -2107,6 +2118,7 @@
           "show": true
         },
         {
+          "$$hashKey": "object:922",
           "format": "short",
           "label": null,
           "logBase": 1,
@@ -2121,8 +2133,8 @@
       }
     }
   ],
-  "refresh": "10s",
-  "schemaVersion": 16,
+  "refresh": "",
+  "schemaVersion": 30,
   "style": "dark",
   "tags": [],
   "templating": {
@@ -2135,7 +2147,8 @@
         },
         "hide": 0,
         "label": null,
-        "name": "Source",
+        "multi": false,
+        "name": "datasource",
         "options": [],
         "query": "prometheus",
         "refresh": 1,
@@ -2145,12 +2158,8 @@
       },
       {
         "allValue": null,
-        "current": {
-          "selected": false,
-          "text": "dogfood",
-          "value": "dogfood"
-        },
-        "datasource": "${Source}",
+        "current": {},
+        "datasource": "${datasource}",
         "definition": "label_values(juicefs_uptime, vol_name)",
         "description": null,
         "error": null,
@@ -2173,13 +2182,11 @@
     ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {
     "refresh_intervals": [
-      "5s",
-      "10s",
       "30s",
       "1m",
       "5m",

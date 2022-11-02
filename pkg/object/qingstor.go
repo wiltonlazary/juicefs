@@ -1,18 +1,20 @@
+//go:build !noqingstore
 // +build !noqingstore
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -22,13 +24,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/yunify/qingstor-sdk-go/config"
-	qs "github.com/yunify/qingstor-sdk-go/service"
+	"github.com/juicedata/juicefs/pkg/utils"
+	"github.com/qingstor/qingstor-sdk-go/v4/config"
+	"github.com/qingstor/qingstor-sdk-go/v4/request/errors"
+	qs "github.com/qingstor/qingstor-sdk-go/v4/service"
 )
 
 type qingstor struct {
@@ -50,9 +56,10 @@ func (q *qingstor) Create() error {
 func (q *qingstor) Head(key string) (Object, error) {
 	r, err := q.bucket.HeadObject(key, nil)
 	if err != nil {
-		return nil, err
+		if e, ok := err.(*errors.QingStorError); ok && e.StatusCode == http.StatusNotFound {
+			return nil, os.ErrNotExist
+		}
 	}
-
 	return &obj{
 		key,
 		*r.ContentLength,
@@ -119,7 +126,12 @@ func (q *qingstor) Put(key string, in io.Reader) error {
 	if err != nil {
 		return err
 	}
-	input := &qs.PutObjectInput{Body: body, ContentLength: &vlen}
+	mimeType := utils.GuessMimeType(key)
+	input := &qs.PutObjectInput{
+		Body:          body,
+		ContentLength: &vlen,
+		ContentType:   &mimeType,
+	}
 	out, err := q.bucket.PutObject(key, input)
 	if err != nil {
 		return err
@@ -150,15 +162,16 @@ func (q *qingstor) Delete(key string) error {
 	return err
 }
 
-func (q *qingstor) List(prefix, marker string, limit int64) ([]Object, error) {
+func (q *qingstor) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
 	limit_ := int(limit)
 	input := &qs.ListObjectsInput{
-		Prefix: &prefix,
-		Marker: &marker,
-		Limit:  &limit_,
+		Prefix:    &prefix,
+		Marker:    &marker,
+		Limit:     &limit_,
+		Delimiter: &delimiter,
 	}
 	out, err := q.bucket.ListObjects(input)
 	if err != nil {
@@ -174,6 +187,12 @@ func (q *qingstor) List(prefix, marker string, limit int64) ([]Object, error) {
 			time.Unix(int64(*k.Modified), 0),
 			strings.HasSuffix(*k.Key, "/"),
 		}
+	}
+	if delimiter != "" {
+		for _, p := range out.CommonPrefixes {
+			objs = append(objs, &obj{*p, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -245,19 +264,28 @@ func (q *qingstor) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, nextMarker, nil
 }
 
-func newQingStor(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newQingStor(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint: %v, error: %v", endpoint, err)
 	}
-	hostParts := strings.SplitN(uri.Host, ".", 3)
-	bucketName := hostParts[0]
-	zone := hostParts[1]
-
+	var bucketName, zone, host string
+	if !strings.HasSuffix(uri.Host, "qingstor.com") {
+		// support private cloud
+		hostParts := strings.SplitN(uri.Host, ".", 2)
+		bucketName, zone, host = hostParts[0], "", hostParts[1]
+	} else {
+		hostParts := strings.SplitN(uri.Host, ".", 3)
+		bucketName, zone, host = hostParts[0], hostParts[1], hostParts[2]
+	}
 	conf, err := config.New(accessKey, secretKey)
 	if err != nil {
 		return nil, fmt.Errorf("Can't load config: %s", err.Error())
 	}
+	conf.Host = host
 	conf.Protocol = uri.Scheme
 	if uri.Scheme == "http" {
 		conf.Port = 80
@@ -265,8 +293,6 @@ func newQingStor(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		conf.Port = 443
 	}
 	conf.Connection = httpClient
-	// workaround for https://github.com/yunify/qingstor-sdk-go/commit/9a04b54d6d574d368eac3aa627879b169a175f12
-	conf.ConnectionRetries = 0
 	qsService, _ := qs.Init(conf)
 	bucket, _ := qsService.Bucket(bucketName, zone)
 	return &qingstor{bucket: bucket}, nil

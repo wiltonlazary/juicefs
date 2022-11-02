@@ -1,0 +1,105 @@
+name: "rmr-test"
+
+on:
+  schedule:
+    - cron:  '0 20 * * *'
+  workflow_dispatch:
+
+jobs:
+  rmr-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        meta: [ 'sqlite3', 'redis', 'mysql',  'postgres', 'tikv', 'fdb', 'badger', 'etcd']
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+      
+      - name: Set Variable
+        id: vars
+        run: |
+          if [ "${{matrix.meta}}" == "fdb" ]; then
+            echo ::set-output name=target::"juicefs.fdb"
+          else
+            echo ::set-output name=target::"juicefs"
+          fi
+
+      - name: Build
+        uses: ./.github/actions/build
+        with: 
+          target: ${{steps.vars.outputs.target}}
+
+      - name: Prepare meta db
+        run: | 
+          sudo chmod +x .github/scripts/start_meta_engine.sh
+          source .github/scripts/start_meta_engine.sh
+          start_meta_engine ${{matrix.meta}}
+
+      - name: Rmr
+        shell: bash
+        run: |
+          source .github/scripts/start_meta_engine.sh
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          create_database $meta_url
+          mp=/tmp/jfs
+          # wget -q https://s.juicefs.com/static/bench/500K_empty_files.dump.gz
+          # gzip -dk  500K_empty_files.dump.gz
+          # ./juicefs load $meta_url 500K_empty_files.dump
+          ./juicefs format $meta_url jfs
+          ./juicefs mdtest $meta_url test --dirs 10 --depth 3 --files 10 --threads 10 --no-usage-report
+          ./juicefs mount -d $meta_url $mp --no-usage-report
+          sleep 3
+          ls -l $mp/test
+          ./juicefs rmr $mp/test/
+          sleep 3 
+          ls -l $mp/test && exit 1 || true
+        
+      - name: Clear
+        run: | 
+          source .github/scripts/start_meta_engine.sh
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          mp=/tmp/jfs
+          volume=jfs
+          test -d $mp && ./juicefs umount -f $mp
+          ./juicefs status $meta_url && UUID=$(./juicefs status $meta_url | grep UUID | cut -d '"' -f 4) || echo "meta not exist"
+          if [ -n "$UUID" ];then
+            ./juicefs destroy --force $meta_url $UUID
+          fi
+          test -d /var/jfs/$volume && rm -rf /var/jfs/$volume || true
+        shell: bash
+
+      - name: Rmr Parallel
+        shell: bash
+        run: |
+          sudo chmod 777 /var
+          source .github/scripts/start_meta_engine.sh
+          meta_url=$(get_meta_url ${{matrix.meta}})
+          mp=/tmp/jfs
+          # wget -q https://s.juicefs.com/static/bench/500K_empty_files.dump.gz
+          # gzip -dk  500K_empty_files.dump.gz
+          # ./juicefs load $meta_url 500K_empty_files.dump
+          ./juicefs format $meta_url jfs
+          ./juicefs mdtest $meta_url test --dirs 10 --depth 3 --files 15 --threads 10 --no-usage-report
+          ./juicefs mount -d $meta_url $mp --no-usage-report
+          sleep 3
+          declare -a pidlist
+          ./juicefs rmr $mp/test/ || true &
+          pidlist+=($!)
+          ./juicefs rmr $mp/test/ || true &
+          pidlist+=($!)
+          ./juicefs rmr $mp/test/ || true &
+          pidlist+=($!)
+          wait "${pidlist[@]}"
+          ls -l $mp/test && exit 1 || true
+
+      - name: log
+        if: ${{ always() }}
+        shell: bash
+        run: | 
+          tail -300 ~/.juicefs/juicefs.log
+          grep "<FATAL>:" ~/.juicefs/juicefs.log && exit 1 || true

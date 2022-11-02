@@ -1,18 +1,20 @@
+//go:build !noobs
 // +build !noobs
 
 /*
- * JuiceFS, Copyright (C) 2019 Juicedata, Inc.
+ * JuiceFS, Copyright 2019 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -24,11 +26,15 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
+	"github.com/juicedata/juicefs/pkg/utils"
 	"golang.org/x/net/http/httpproxy"
 )
 
@@ -48,6 +54,7 @@ func (s *obsClient) Create() error {
 	params := &obs.CreateBucketInput{}
 	params.Bucket = s.bucket
 	params.Location = s.region
+	params.AvailableZone = "3az"
 	_, err := s.c.CreateBucket(params)
 	if err != nil && isExists(err) {
 		err = nil
@@ -62,6 +69,9 @@ func (s *obsClient) Head(key string) (Object, error) {
 	}
 	r, err := s.c.GetObjectMetadata(params)
 	if err != nil {
+		if e, ok := err.(obs.ObsError); ok && e.BaseModel.StatusCode == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 	return &obj{
@@ -116,15 +126,18 @@ func (s *obsClient) Put(key string, in io.Reader) error {
 		sum = s[:]
 		body = bytes.NewReader(data)
 	}
-
+	mimeType := utils.GuessMimeType(key)
 	params := &obs.PutObjectInput{}
 	params.Bucket = s.bucket
 	params.Key = key
 	params.Body = body
 	params.ContentLength = vlen
 	params.ContentMD5 = base64.StdEncoding.EncodeToString(sum[:])
-
-	_, err := s.c.PutObject(params)
+	params.ContentType = mimeType
+	resp, err := s.c.PutObject(params)
+	if err == nil && strings.Trim(resp.ETag, "\"") != obs.Hex(sum) {
+		err = fmt.Errorf("unexpected ETag: %s != %s", strings.Trim(resp.ETag, "\""), obs.Hex(sum))
+	}
 	return err
 }
 
@@ -146,13 +159,14 @@ func (s *obsClient) Delete(key string) error {
 	return err
 }
 
-func (s *obsClient) List(prefix, marker string, limit int64) ([]Object, error) {
+func (s *obsClient) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	input := &obs.ListObjectsInput{
 		Bucket: s.bucket,
 		Marker: marker,
 	}
 	input.Prefix = prefix
 	input.MaxKeys = int(limit)
+	input.Delimiter = delimiter
 	resp, err := s.c.ListObjects(input)
 	if err != nil {
 		return nil, err
@@ -162,6 +176,12 @@ func (s *obsClient) List(prefix, marker string, limit int64) ([]Object, error) {
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
 		objs[i] = &obj{o.Key, o.Size, o.LastModified, strings.HasSuffix(o.Key, "/")}
+	}
+	if delimiter != "" {
+		for _, p := range resp.CommonPrefixes {
+			objs = append(objs, &obj{p, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -192,10 +212,13 @@ func (s *obsClient) UploadPart(key string, uploadID string, num int, body []byte
 	sum := md5.Sum(body)
 	params.ContentMD5 = base64.StdEncoding.EncodeToString(sum[:])
 	resp, err := s.c.UploadPart(params)
+	if err == nil && strings.Trim(resp.ETag, "\"") != obs.Hex(sum[:]) {
+		err = fmt.Errorf("unexpected ETag: %s != %s", strings.Trim(resp.ETag, "\""), obs.Hex(sum[:]))
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &Part{Num: num, ETag: resp.ETag}, nil
+	return &Part{Num: num, ETag: resp.ETag}, err
 }
 
 func (s *obsClient) AbortUpload(key string, uploadID string) {
@@ -239,14 +262,14 @@ func (s *obsClient) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, nextMarker, nil
 }
 
-func autoOBSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
+func autoOBSEndpoint(bucketName, accessKey, secretKey, token string) (string, error) {
 	region := obsDefaultRegion
 	if r := os.Getenv("HWCLOUD_DEFAULT_REGION"); r != "" {
 		region = r
 	}
 	endpoint := fmt.Sprintf("https://obs.%s.myhuaweicloud.com", region)
 
-	obsCli, err := obs.New(accessKey, secretKey, endpoint)
+	obsCli, err := obs.New(accessKey, secretKey, endpoint, obs.WithSecurityToken(token))
 	if err != nil {
 		return "", err
 	}
@@ -265,7 +288,10 @@ func autoOBSEndpoint(bucketName, accessKey, secretKey string) (string, error) {
 	return "", fmt.Errorf("bucket %q does not exist", bucketName)
 }
 
-func newOBS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newOBS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid endpoint %s: %q", endpoint, err)
@@ -283,7 +309,7 @@ func newOBS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 
 	var region string
 	if len(hostParts) == 1 {
-		if endpoint, err = autoOBSEndpoint(bucketName, accessKey, secretKey); err != nil {
+		if endpoint, err = autoOBSEndpoint(bucketName, accessKey, secretKey, token); err != nil {
 			return nil, fmt.Errorf("cannot get location of bucket %s: %q", bucketName, err)
 		}
 		if !strings.HasPrefix(endpoint, "http") {
@@ -308,7 +334,8 @@ func newOBS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 
 	// Empty proxy url string has no effect
 	// there is a bug in the retry of PUT (did not call Seek(0,0) before retry), so disable the retry here
-	c, err := obs.New(accessKey, secretKey, endpoint, obs.WithProxyUrl(urlString), obs.WithMaxRetryCount(0))
+	c, err := obs.New(accessKey, secretKey, endpoint, obs.WithSecurityToken(token),
+		obs.WithProxyUrl(urlString), obs.WithMaxRetryCount(0))
 	if err != nil {
 		return nil, fmt.Errorf("fail to initialize OBS: %q", err)
 	}

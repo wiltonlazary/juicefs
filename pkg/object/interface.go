@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -25,6 +26,7 @@ type Object interface {
 	Size() int64
 	Mtime() time.Time
 	IsDir() bool
+	IsSymlink() bool
 }
 
 type obj struct {
@@ -38,6 +40,7 @@ func (o *obj) Key() string      { return o.key }
 func (o *obj) Size() int64      { return o.size }
 func (o *obj) Mtime() time.Time { return o.mtime }
 func (o *obj) IsDir() bool      { return o.isDir }
+func (o *obj) IsSymlink() bool  { return false }
 
 type MultipartUpload struct {
 	MinPartSize int
@@ -74,7 +77,7 @@ type ObjectStorage interface {
 	// Head returns some information about the object or an error if not found.
 	Head(key string) (Object, error)
 	// List returns a list of objects.
-	List(prefix, marker string, limit int64) ([]Object, error)
+	List(prefix, marker, delimiter string, limit int64) ([]Object, error)
 	// ListAll returns all the objects as an channel.
 	ListAll(prefix, marker string) (<-chan Object, error)
 

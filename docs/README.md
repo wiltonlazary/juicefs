@@ -1,6 +1,6 @@
 # JuiceFS User Manual
 
-Please select the user documentation in your preferred language:
+Please visit JuiceFS Documentation Center for more information:
 
-- [English](en/README.md)
-- [简体中文](zh_cn/README.md)
+- [🇬🇧 English](https://juicefs.com/docs/community/introduction)
+- [🇨🇳 简体中文](https://juicefs.com/docs/zh/community/introduction)

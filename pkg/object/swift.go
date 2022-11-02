@@ -1,28 +1,34 @@
+//go:build !noswift
 // +build !noswift
 
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/ncw/swift"
 )
 
@@ -57,15 +63,64 @@ func (s *swiftOSS) Get(key string, off, limit int64) (io.ReadCloser, error) {
 }
 
 func (s *swiftOSS) Put(key string, in io.Reader) error {
-	_, err := s.conn.ObjectPut(s.container, key, in, true, "", "", nil)
+	mimeType := utils.GuessMimeType(key)
+	_, err := s.conn.ObjectPut(s.container, key, in, true, "", mimeType, nil)
 	return err
 }
 
 func (s *swiftOSS) Delete(key string) error {
-	return s.conn.ObjectDelete(s.container, key)
+	err := s.conn.ObjectDelete(s.container, key)
+	if err != nil && errors.Is(err, swift.ObjectNotFound) {
+		err = nil
+	}
+	return err
 }
 
-func newSwiftOSS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func (s *swiftOSS) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+	if limit > 10000 {
+		limit = 10000
+	}
+	var delimiter_ rune
+	if delimiter != "" {
+		if len([]rune(delimiter)) == 1 {
+			delimiter_ = []rune(delimiter)[0]
+		} else {
+			return nil, fmt.Errorf("delimiter should be a rune but now is %s", delimiter)
+		}
+	}
+	objects, err := s.conn.Objects(s.container, &swift.ObjectsOpts{Prefix: prefix, Marker: marker, Delimiter: delimiter_, Limit: int(limit)})
+	if err != nil {
+		return nil, err
+	}
+	var objs = make([]Object, len(objects))
+	for i, o := range objects {
+		// https://docs.openstack.org/swift/latest/api/pseudo-hierarchical-folders-directories.html
+		if delimiter != "" && o.PseudoDirectory {
+			objs[i] = &obj{o.SubDir, 0, time.Unix(0, 0), true}
+		} else {
+			objs[i] = &obj{o.Name, o.Bytes, o.LastModified, strings.HasSuffix(o.Name, "/")}
+		}
+	}
+	return objs, nil
+}
+
+func (s *swiftOSS) Head(key string) (Object, error) {
+	object, _, err := s.conn.Object(s.container, key)
+	if err == swift.ObjectNotFound {
+		err = os.ErrNotExist
+	}
+	return &obj{
+		key,
+		object.Bytes,
+		object.LastModified,
+		strings.HasSuffix(key, "/"),
+	}, err
+}
+
+func newSwiftOSS(endpoint, username, apiKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("http://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)
@@ -85,9 +140,10 @@ func newSwiftOSS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	authURL := uri.Scheme + "://" + host + "/auth/v1.0"
 
 	conn := swift.Connection{
-		UserName: accessKey,
-		ApiKey:   secretKey,
-		AuthUrl:  authURL,
+		UserName:  username,
+		ApiKey:    apiKey,
+		AuthToken: token,
+		AuthUrl:   authURL,
 	}
 	err = conn.Authenticate()
 	if err != nil {

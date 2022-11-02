@@ -1,64 +1,104 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
-	"fmt"
+	"compress/gzip"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/urfave/cli/v2"
 )
 
-func dump(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		return fmt.Errorf("META-URL is needed")
-	}
-	var fp io.WriteCloser
-	if ctx.Args().Len() == 1 {
-		fp = os.Stdout
-	} else {
-		var err error
-		fp, err = os.OpenFile(ctx.Args().Get(1), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		if err != nil {
-			return err
-		}
-		defer fp.Close()
-	}
-	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true, Subdir: ctx.String("subdir")})
-	if err := m.DumpMeta(fp); err != nil {
-		return err
-	}
-	logger.Infof("Dump metadata into %s succeed", ctx.Args().Get(1))
-	return nil
-}
-
-func dumpFlags() *cli.Command {
+func cmdDump() *cli.Command {
 	return &cli.Command{
 		Name:      "dump",
-		Usage:     "dump metadata into a JSON file",
-		ArgsUsage: "META-URL [FILE]",
 		Action:    dump,
+		Category:  "ADMIN",
+		Usage:     "Dump metadata into a JSON file",
+		ArgsUsage: "META-URL [FILE]",
+		Description: `
+Dump metadata of the volume in JSON format so users are able to see its content in an easy way.
+Output of this command can be loaded later into an empty database, serving as a method to backup
+metadata or to change metadata engine.
+
+Examples:
+$ juicefs dump redis://localhost meta-dump.json
+$ juicefs dump redis://localhost meta-dump.json.gz
+
+# Dump only a subtree of the volume to STDOUT
+$ juicefs dump redis://localhost --subdir /dir/in/jfs
+
+Details: https://juicefs.com/docs/community/metadata_dump_load`,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "subdir",
-				Usage: "only dump a sub-directory.",
+				Usage: "only dump a sub-directory",
+			},
+			&cli.BoolFlag{
+				Name:  "keep-secret-key",
+				Usage: "keep secret keys intact (WARNING: Be careful as they may be leaked)",
 			},
 		},
 	}
+}
+
+func dump(ctx *cli.Context) (err error) {
+	setup(ctx, 1)
+	metaUri := ctx.Args().Get(0)
+	dst := ctx.Args().Get(1)
+	removePassword(metaUri)
+	var w io.WriteCloser
+	if ctx.Args().Len() == 1 {
+		w = os.Stdout
+		dst = "STDOUT"
+	} else {
+		fp, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			e := fp.Close()
+			if err == nil {
+				err = e
+			}
+		}()
+		if strings.HasSuffix(dst, ".gz") {
+			zw := gzip.NewWriter(fp)
+			defer func() {
+				e := zw.Close()
+				if err == nil {
+					err = e
+				}
+			}()
+			w = zw
+		} else {
+			w = fp
+		}
+	}
+	m := meta.NewClient(metaUri, &meta.Config{Retries: 10, Strict: true, Subdir: ctx.String("subdir")})
+	if _, err := m.Load(true); err != nil {
+		return err
+	}
+	if err := m.DumpMeta(w, 1, ctx.Bool("keep-secret-key")); err != nil {
+		return err
+	}
+	logger.Infof("Dump metadata into %s succeed", dst)
+	return nil
 }

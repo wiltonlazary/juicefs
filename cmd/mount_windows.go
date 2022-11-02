@@ -1,25 +1,22 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
-	"strings"
-
-	"github.com/juicedata/juicefs/pkg/chunk"
-	"github.com/juicedata/juicefs/pkg/fs"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/vfs"
 	"github.com/juicedata/juicefs/pkg/winfsp"
@@ -48,19 +45,14 @@ func mount_flags() []cli.Flag {
 	}
 }
 
-func makeDaemon(c *cli.Context, name, mp string) error {
+func makeDaemon(c *cli.Context, name, mp string, m meta.Meta) error {
 	logger.Warnf("Cannot run in background in Windows.")
 	return nil
 }
 
-func mount_main(conf *vfs.Config, m meta.Meta, store chunk.ChunkStore, c *cli.Context) {
-	jfs, err := fs.NewFileSystem(conf, m, store)
-	if err != nil {
-		logger.Fatalf("Initialize failed: %s", err)
-	}
-	winfsp.Serve(conf, jfs, c.String("o"), c.Float64("file-cache-to"), c.Bool("as-root"), c.Int("delay-close"),
-		strings.HasSuffix(conf.Mountpoint, ":"))
+func mount_main(v *vfs.VFS, c *cli.Context) {
+	winfsp.Serve(v, c.String("o"), c.Float64("file-cache-to"), c.Bool("as-root"), c.Int("delay-close"))
 }
 
-func checkMountpoint(name, mp string) {
+func checkMountpoint(name, mp, logPath string, background bool) {
 }

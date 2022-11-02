@@ -1,18 +1,20 @@
+//go:build !nos3
 // +build !nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -36,7 +38,10 @@ func (s *wasabi) String() string {
 	return fmt.Sprintf("wasabi://%s/", s.s3client.bucket)
 }
 
-func newWasabi(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newWasabi(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)
@@ -53,7 +58,7 @@ func newWasabi(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		DisableSSL:       aws.Bool(!ssl),
 		S3ForcePathStyle: aws.Bool(false),
 		HTTPClient:       httpClient,
-		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, token),
 	}
 
 	ses, err := session.NewSession(awsConfig)

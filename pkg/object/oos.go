@@ -1,18 +1,20 @@
+//go:build !nos3
 // +build !nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -37,25 +39,28 @@ func (s *oos) String() string {
 }
 
 func (s *oos) Create() error {
-	_, err := s.List("", "", 1)
+	_, err := s.List("", "", "", 1)
 	if err != nil {
 		return fmt.Errorf("please create bucket %s manually", s.s3client.bucket)
 	}
 	return err
 }
 
-func (s *oos) List(prefix, marker string, limit int64) ([]Object, error) {
+func (s *oos) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	objs, err := s.s3client.List(prefix, marker, limit)
+	objs, err := s.s3client.List(prefix, marker, delimiter, limit)
 	if marker != "" && len(objs) > 0 && objs[0].Key() == marker {
 		objs = objs[1:]
 	}
 	return objs, err
 }
 
-func newOOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newOOS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)
@@ -73,7 +78,7 @@ func newOOS(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		DisableSSL:       aws.Bool(!ssl),
 		S3ForcePathStyle: aws.Bool(!forcePathStyle),
 		HTTPClient:       httpClient,
-		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, token),
 	}
 
 	ses, err := session.NewSession(awsConfig)

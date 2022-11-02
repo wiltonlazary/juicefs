@@ -1,22 +1,22 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -30,167 +30,211 @@ import (
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/vfs"
 
-	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
-	"github.com/vbauerster/mpb/v7"
-	"github.com/vbauerster/mpb/v7/decor"
 )
 
-func gcFlags() *cli.Command {
+func cmdGC() *cli.Command {
 	return &cli.Command{
 		Name:      "gc",
-		Usage:     "collect any leaked objects",
-		ArgsUsage: "META-URL",
 		Action:    gc,
+		Category:  "ADMIN",
+		Usage:     "Garbage collector of objects in data storage",
+		ArgsUsage: "META-URL",
+		Description: `
+It scans all objects in data storage and slices in metadata, comparing them to see if there is any
+leaked object. It can also actively trigger compaction of slices.
+Use this command if you find that data storage takes more than expected.
+
+Examples:
+# Check only, no writable change
+$ juicefs gc redis://localhost
+
+# Trigger compaction of all slices
+$ juicefs gc redis://localhost --compact
+
+# Delete leaked objects
+$ juicefs gc redis://localhost --delete`,
 		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:  "delete",
-				Usage: "deleted leaked objects",
-			},
 			&cli.BoolFlag{
 				Name:  "compact",
 				Usage: "compact small slices into bigger ones",
 			},
+			&cli.BoolFlag{
+				Name:  "delete",
+				Usage: "delete leaked objects",
+			},
 			&cli.IntFlag{
-				Name:  "threads",
-				Value: 10,
-				Usage: "number threads to delete leaked objects",
+				Name:    "threads",
+				Aliases: []string{"p"},
+				Value:   10,
+				Usage:   "number threads to delete leaked objects",
 			},
 		},
 	}
 }
 
-type objCounter struct {
-	count *mpb.Bar
-	bytes *mpb.Bar
-}
-
-func (c *objCounter) add(size int64) {
-	c.count.Increment()
-	c.bytes.IncrInt64(size)
-}
-
-func (c *objCounter) done() {
-	c.count.SetTotal(0, true)
-	c.bytes.SetTotal(0, true)
+type dSlice struct {
+	id     uint64
+	length uint32
 }
 
 func gc(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		return fmt.Errorf("META-URL is needed")
-	}
-	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true})
-	format, err := m.Load()
+	setup(ctx, 1)
+	removePassword(ctx.Args().Get(0))
+	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{
+		Retries: 10,
+		Strict:  true,
+	})
+	format, err := m.Load(true)
 	if err != nil {
 		logger.Fatalf("load setting: %s", err)
 	}
 
 	chunkConf := chunk.Config{
-		BlockSize: format.BlockSize * 1024,
-		Compress:  format.Compression,
-
+		BlockSize:  format.BlockSize * 1024,
+		Compress:   format.Compression,
 		GetTimeout: time.Second * 60,
 		PutTimeout: time.Second * 60,
 		MaxUpload:  20,
-		Prefetch:   0,
-		BufferSize: 300,
+		MaxDeletes: ctx.Int("threads"),
+		BufferSize: 300 << 20,
 		CacheDir:   "memory",
-		CacheSize:  300,
 	}
 
-	blob, err := createStorage(format)
+	blob, err := createStorage(*format)
 	if err != nil {
 		logger.Fatalf("object storage: %s", err)
 	}
 	logger.Infof("Data use %s", blob)
+	store := chunk.NewCachedStore(blob, chunkConf, nil)
 
-	store := chunk.NewCachedStore(blob, chunkConf)
-	m.OnMsg(meta.DeleteChunk, meta.MsgCallback(func(args ...interface{}) error {
-		chunkid := args[0].(uint64)
-		length := args[1].(uint32)
-		return store.Remove(chunkid, int(length))
-	}))
+	// Scan all chunks first and do compaction if necessary
+	progress := utils.NewProgress(false, false)
 	if ctx.Bool("compact") {
-		var nc, ns, nb int
-		var lastLog time.Time
-		m.OnMsg(meta.CompactChunk, meta.MsgCallback(func(args ...interface{}) error {
+		bar := progress.AddCountBar("Scanned chunks", 0)
+		spin := progress.AddDoubleSpinner("Compacted slices")
+		m.OnMsg(meta.DeleteSlice, func(args ...interface{}) error {
+			return store.Remove(args[0].(uint64), int(args[1].(uint32)))
+		})
+		m.OnMsg(meta.CompactChunk, func(args ...interface{}) error {
 			slices := args[0].([]meta.Slice)
-			chunkid := args[1].(uint64)
-			err = vfs.Compact(chunkConf, store, slices, chunkid)
-			nc++
+			err := vfs.Compact(chunkConf, store, slices, args[1].(uint64))
 			for _, s := range slices {
-				ns++
-				nb += int(s.Len)
-			}
-			if time.Since(lastLog) > time.Second && isatty.IsTerminal(os.Stdout.Fd()) {
-				fmt.Printf("Compacted %d chunks (%d slices, %d bytes).\r", nc, ns, nb)
-				lastLog = time.Now()
+				spin.IncrInt64(int64(s.Len))
 			}
 			return err
-		}))
-		logger.Infof("start to compact chunks ...")
-		err := m.CompactAll(meta.Background)
-		if err != 0 {
-			logger.Errorf("compact all chunks: %s", err)
+		})
+		if st := m.CompactAll(meta.Background, bar); st == 0 {
+			bar.Done()
+			spin.Done()
+			if progress.Quiet {
+				c, b := spin.Current()
+				logger.Infof("Compacted %d chunks (%d slices, %d bytes).", bar.Current(), c, b)
+			}
 		} else {
-			logger.Infof("Compacted %d chunks (%d slices, %d bytes).", nc, ns, nb)
+			logger.Errorf("compact all chunks: %s", st)
+		}
+	} else {
+		m.OnMsg(meta.CompactChunk, func(args ...interface{}) error {
+			return nil // ignore compaction
+		})
+	}
+
+	// put it above delete count spinner
+	sliceCSpin := progress.AddCountSpinner("Listed slices")
+
+	// Delete pending slices while listing all slices
+	delete := ctx.Bool("delete")
+	threads := ctx.Int("threads")
+	if delete && threads <= 0 {
+		logger.Fatal("threads should be greater than 0 to delete objects")
+	}
+	var delSpin *utils.Bar
+	var sliceChan chan *dSlice // pending delete slices
+	var wg sync.WaitGroup
+	if delete {
+		delSpin = progress.AddCountSpinner("Deleted pending")
+		sliceChan = make(chan *dSlice, 10240)
+		m.OnMsg(meta.DeleteSlice, func(args ...interface{}) error {
+			delSpin.Increment()
+			sliceChan <- &dSlice{args[0].(uint64), args[1].(uint32)}
+			return nil
+		})
+		for i := 0; i < threads; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for s := range sliceChan {
+					if err := store.Remove(s.id, int(s.length)); err != nil {
+						logger.Warnf("remove %d_%d: %s", s.id, s.length, err)
+					}
+				}
+			}()
 		}
 	}
 
+	// List all slices in metadata engine
+	var c = meta.NewContext(0, 0, []uint32{0})
+	slices := make(map[meta.Ino][]meta.Slice)
+	r := m.ListSlices(c, slices, delete, sliceCSpin.Increment)
+	if r != 0 {
+		logger.Fatalf("list all slices: %s", r)
+	}
+	if delete {
+		close(sliceChan)
+		wg.Wait()
+		delSpin.Done()
+		if progress.Quiet {
+			logger.Infof("Deleted %d pending slices", delSpin.Current())
+		}
+	}
+	sliceCSpin.Done()
+
+	// Scan all objects to find leaked ones
 	blob = object.WithPrefix(blob, "chunks/")
 	objs, err := osync.ListAll(blob, "", "")
 	if err != nil {
 		logger.Fatalf("list all blocks: %s", err)
 	}
-
-	progress, bar := utils.NewProgressCounter("listed slices counter: ")
-	var c = meta.NewContext(0, 0, []uint32{0})
-	var slices []meta.Slice
-	r := m.ListSlices(c, &slices, ctx.Bool("delete"), bar.Increment)
-	if r != 0 {
-		logger.Fatalf("list all slices: %s", r)
-	}
-	bar.SetTotal(0, true)
-	progress.Wait()
-
-	keys := make(map[uint64]uint32)
+	vkeys := make(map[uint64]uint32)
+	ckeys := make(map[uint64]uint32)
 	var total int64
 	var totalBytes uint64
-	for _, s := range slices {
-		keys[s.Chunkid] = s.Size
-		total += int64(int(s.Size-1)/chunkConf.BlockSize) + 1 // s.Size should be > 0
+	for _, s := range slices[1] {
+		ckeys[s.Id] = s.Size
+		total += int64(int(s.Size-1)/chunkConf.BlockSize) + 1
 		totalBytes += uint64(s.Size)
 	}
-	logger.Infof("using %d slices (%d bytes)", len(keys), totalBytes)
-
-	progress, bar = utils.NewDynProgressBar("scanning objects: ", false)
-	bar.SetTotal(total, false)
-	addSpinner := func(name string) *objCounter {
-		count := progress.Add(0,
-			utils.NewSpinner(),
-			mpb.PrependDecorators(
-				decor.Name(name+" count: ", decor.WCSyncWidth),
-				decor.CurrentNoUnit("%d", decor.WCSyncWidthR),
-			),
-			mpb.BarFillerClearOnComplete(),
-		)
-		bytes := progress.Add(0,
-			utils.NewSpinner(),
-			mpb.PrependDecorators(
-				decor.Name(name+" bytes: ", decor.WCSyncWidth),
-				decor.CurrentKibiByte("% d", decor.WCSyncWidthR),
-			),
-			mpb.BarFillerClearOnComplete(),
-		)
-		return &objCounter{count, bytes}
+	slices[1] = nil
+	for _, ss := range slices {
+		for _, s := range ss {
+			vkeys[s.Id] = s.Size
+			total += int64(int(s.Size-1)/chunkConf.BlockSize) + 1 // s.Size should be > 0
+			totalBytes += uint64(s.Size)
+		}
 	}
-	valid, leaked, skipped := addSpinner("valid"), addSpinner("leaked"), addSpinner("skipped")
+	if progress.Quiet {
+		logger.Infof("using %d slices (%d bytes)", len(vkeys)+len(ckeys), totalBytes)
+	}
 
+	bar := progress.AddCountBar("Scanned objects", total)
+	valid := progress.AddDoubleSpinner("Valid objects")
+	compacted := progress.AddDoubleSpinner("Compacted objects")
+	leaked := progress.AddDoubleSpinner("Leaked objects")
+	skipped := progress.AddDoubleSpinner("Skipped objects")
 	maxMtime := time.Now().Add(time.Hour * -1)
+	strDuration := os.Getenv("JFS_GC_SKIPPEDTIME")
+	if strDuration != "" {
+		iDuration, err := strconv.Atoi(strDuration)
+		if err == nil {
+			maxMtime = time.Now().Add(time.Second * -1 * time.Duration(iDuration))
+		} else {
+			logger.Errorf("parse JFS_GC_SKIPPEDTIME=%s: %s", strDuration, err)
+		}
+	}
+
 	var leakedObj = make(chan string, 10240)
-	var wg sync.WaitGroup
-	for i := 0; i < ctx.Int("threads"); i++ {
+	for i := 0; i < threads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -203,13 +247,13 @@ func gc(ctx *cli.Context) error {
 	}
 
 	foundLeaked := func(obj object.Object) {
-		total++
-		bar.SetTotal(total, false)
-		leaked.add(obj.Size())
-		if ctx.Bool("delete") {
+		bar.IncrTotal(1)
+		leaked.IncrInt64(obj.Size())
+		if delete {
 			leakedObj <- obj.Key()
 		}
 	}
+
 	for obj := range objs {
 		if obj == nil {
 			break // failed listing
@@ -220,7 +264,7 @@ func gc(ctx *cli.Context) error {
 		if obj.Mtime().After(maxMtime) || obj.Mtime().Unix() == 0 {
 			logger.Debugf("ignore new block: %s %s", obj.Key(), obj.Mtime())
 			bar.Increment()
-			skipped.add(obj.Size())
+			skipped.IncrInt64(obj.Size())
 			continue
 		}
 
@@ -236,7 +280,12 @@ func gc(ctx *cli.Context) error {
 		}
 		bar.Increment()
 		cid, _ := strconv.Atoi(parts[0])
-		size := keys[uint64(cid)]
+		size := vkeys[uint64(cid)]
+		var cobj bool
+		if size == 0 {
+			size = ckeys[uint64(cid)]
+			cobj = true
+		}
 		if size == 0 {
 			logger.Debugf("find leaked object: %s, size: %d", obj.Key(), obj.Size())
 			foundLeaked(obj)
@@ -248,29 +297,33 @@ func gc(ctx *cli.Context) error {
 			if (indx+1)*csize > int(size) {
 				logger.Warnf("size of slice %d is larger than expected: %d > %d", cid, indx*chunkConf.BlockSize+csize, size)
 				foundLeaked(obj)
+			} else if cobj {
+				compacted.IncrInt64(obj.Size())
 			} else {
-				valid.add(obj.Size())
+				valid.IncrInt64(obj.Size())
 			}
 		} else {
 			if indx*chunkConf.BlockSize+csize != int(size) {
 				logger.Warnf("size of slice %d is %d, but expect %d", cid, indx*chunkConf.BlockSize+csize, size)
 				foundLeaked(obj)
+			} else if cobj {
+				compacted.IncrInt64(obj.Size())
 			} else {
-				valid.add(obj.Size())
+				valid.IncrInt64(obj.Size())
 			}
 		}
 	}
 	close(leakedObj)
 	wg.Wait()
-	bar.SetTotal(0, true)
-	valid.done()
-	leaked.done()
-	skipped.done()
-	progress.Wait()
+	progress.Done()
 
-	logger.Infof("scanned %d objects, %d valid, %d leaked (%d bytes), %d skipped (%d bytes)",
-		bar.Current(), valid.count.Current(), leaked.count.Current(), leaked.bytes.Current(), skipped.count.Current(), skipped.bytes.Current())
-	if leaked.count.Current() > 0 && !ctx.Bool("delete") {
+	vc, _ := valid.Current()
+	cc, cb := compacted.Current()
+	lc, lb := leaked.Current()
+	sc, sb := skipped.Current()
+	logger.Infof("scanned %d objects, %d valid, %d compacted (%d bytes), %d leaked (%d bytes), %d skipped (%d bytes)",
+		bar.Current(), vc, cc, cb, lc, lb, sc, sb)
+	if lc > 0 && !delete {
 		logger.Infof("Please add `--delete` to clean leaked objects")
 	}
 	return nil

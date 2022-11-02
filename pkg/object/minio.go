@@ -1,18 +1,20 @@
+//go:build !nos3
 // +build !nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -37,14 +39,21 @@ func (m *minio) String() string {
 	return fmt.Sprintf("minio://%s/%s/", *m.s3client.ses.Config.Endpoint, m.s3client.bucket)
 }
 
-func newMinio(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newMinio(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("http://%s", endpoint)
+	}
 	uri, err := url.ParseRequestURI(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Invalid endpoint %s: %s", endpoint, err)
 	}
 	ssl := strings.ToLower(uri.Scheme) == "https"
+	region := os.Getenv("MINIO_REGION")
+	if region == "" {
+		region = awsDefaultRegion
+	}
 	awsConfig := &aws.Config{
-		Region:           aws.String(awsDefaultRegion),
+		Region:           aws.String(region),
 		Endpoint:         &uri.Host,
 		DisableSSL:       aws.Bool(!ssl),
 		S3ForcePathStyle: aws.Bool(true),
@@ -57,7 +66,7 @@ func newMinio(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		secretKey = os.Getenv("MINIO_SECRET_KEY")
 	}
 	if accessKey != "" {
-		awsConfig.Credentials = credentials.NewStaticCredentials(accessKey, secretKey, "")
+		awsConfig.Credentials = credentials.NewStaticCredentials(accessKey, secretKey, token)
 	}
 
 	ses, err := session.NewSession(awsConfig)
@@ -67,15 +76,13 @@ func newMinio(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 	ses.Handlers.Build.PushFront(disableSha256Func)
 
 	if len(uri.Path) < 2 {
-		return nil, fmt.Errorf("no bucket name provided in %s: %s", endpoint, err)
+		return nil, fmt.Errorf("no bucket name provided in %s", endpoint)
 	}
 	bucket := uri.Path[1:]
-	for strings.HasSuffix(bucket, "/") {
-		bucket = bucket[:len(bucket)-1]
-	}
 	if strings.Contains(bucket, "/") && strings.HasPrefix(bucket, "minio/") {
 		bucket = bucket[len("minio/"):]
 	}
+	bucket = strings.Split(bucket, "/")[0]
 	return &minio{s3client{bucket, s3.New(ses), ses}}, nil
 }
 

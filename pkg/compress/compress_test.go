@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package compress
@@ -22,22 +23,43 @@ import (
 )
 
 func testCompress(t *testing.T, c Compressor) {
-	src := []byte("hello")
-	dst := make([]byte, c.CompressBound(len(src)))
-	n, err := c.Compress(dst, src)
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
+	src := []byte(c.Name())
+	testIt := func(src []byte) {
+		if len(src) > 1 {
+			_, err := c.Compress(make([]byte, 1), src)
+			if err == nil {
+				t.Fatal("expect short buffer error, but got nil ")
+			}
+		}
+		dst := make([]byte, c.CompressBound(len(src)))
+		n, err := c.Compress(dst, src)
+		if err != nil {
+			t.Fatalf("compress: %s", err)
+		}
+		if len(src) > 1 {
+			_, err = c.Decompress(make([]byte, 1), dst[:n])
+			if err == nil {
+				t.Fatalf("expect short buffer error, but got nil")
+			}
+		}
+		src2 := make([]byte, len(src))
+		n, err = c.Decompress(src2, dst[:n])
+		if err != nil {
+			t.Fatalf("decompress: %s", err)
+		}
+		if string(src2[:n]) != string(src) {
+			t.Fatalf("expect %s but got %s", string(src), string(src2))
+		}
 	}
-	src2 := make([]byte, len(src))
-	n, err = c.Decompress(src2, dst[:n])
-	if err != nil {
-		t.Error(err)
-		t.FailNow()
-	}
-	if string(src2[:n]) != string(src) {
-		t.Error("not matched", string(src2))
-		t.FailNow()
+
+	testIt(src)
+	testIt(nil)
+
+	if c.CompressBound(0) > 0 {
+		n, err := c.Decompress(make([]byte, 100), src[:0])
+		if err == nil || n > 0 {
+			t.Fatalf("decompress should fail, but got %d", n)
+		}
 	}
 }
 
@@ -47,6 +69,10 @@ func TestUncompressed(t *testing.T) {
 
 func TestZstd(t *testing.T) {
 	testCompress(t, NewCompressor("zstd"))
+}
+
+func TestLZ4(t *testing.T) {
+	testCompress(t, NewCompressor("lz4"))
 }
 
 func benchmarkDecompress(b *testing.B, comp Compressor) {

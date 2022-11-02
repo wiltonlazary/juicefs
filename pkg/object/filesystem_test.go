@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -42,72 +43,28 @@ func testKeysEqual(objs []Object, expectedKeys []string) error {
 	return nil
 }
 
-func TestFsFile(t *testing.T) {
-	keys := []string{
-		"x/",
-		"x/x.txt",
-		"xy.txt",
-		"xyz/",
-		"xyz/xyz.txt",
-	}
-	s0, _ := newDisk("/tmp/abc/unit-test/", "", "")
-	// initialize directory tree
-	for _, key := range keys {
-		if err := s0.Put(key, bytes.NewReader([]byte{})); err != nil {
-			t.Fatalf("PUT object `%s` failed: %q", key, err)
-		}
-	}
-	// cleanup
-	defer func() {
-		// delete reversely, directory only can be deleted when it's empty
-		idx := len(keys) - 1
-		for ; idx >= 0; idx-- {
-			if err := s0.Delete(keys[idx]); err != nil {
-				t.Fatalf("DELETE object `%s` failed: %q", keys[idx], err)
-			}
-		}
-	}()
-
-	s, _ := newDisk("/tmp/abc/unit-test/x/", "", "")
-	objs, err := listAll(s, "", "", 100)
-	if err != nil {
-		t.Fatalf("list failed: %s", err)
-	}
-	expectedKeys := []string{"", "x.txt"}
-	if err = testKeysEqual(objs, expectedKeys); err != nil {
-		t.Fatalf("testKeysEqual fail: %s", err)
-	}
-
-	s, _ = newDisk("/tmp/abc/unit-test/x", "", "")
-	objs, err = listAll(s, "", "", 100)
-	if err != nil {
-		t.Fatalf("list failed: %s", err)
-	}
-	expectedKeys = []string{"/", "/x.txt", "y.txt", "yz/", "yz/xyz.txt"}
-	if err = testKeysEqual(objs, expectedKeys); err != nil {
-		t.Fatalf("testKeysEqual fail: %s", err)
-	}
-
-	s, _ = newDisk("/tmp/abc/unit-test/xy", "", "")
-	objs, err = listAll(s, "", "", 100)
-	if err != nil {
-		t.Fatalf("list failed: %s", err)
-	}
-	expectedKeys = []string{".txt", "z/", "z/xyz.txt"}
-	if err = testKeysEqual(objs, expectedKeys); err != nil {
-		t.Fatalf("testKeysEqual fail: %s", err)
-	}
+func TestDisk2(t *testing.T) {
+	s, _ := newDisk("/tmp/abc/", "", "", "")
+	testFileSystem(t, s)
 }
 
-func TestFsSftp(t *testing.T) {
-	// utils.SetLogLevel(logrus.DebugLevel)
-	sftpHost := os.Getenv("SFTP_HOST")
-	if sftpHost == "" {
+func TestSftp2(t *testing.T) {
+	if os.Getenv("SFTP_HOST") == "" {
 		t.SkipNow()
 	}
-	sftpUser, sftpPass := os.Getenv("SFTP_USER"), os.Getenv("SFTP_PASS")
-	s0, _ := newSftp(sftpHost, sftpUser, sftpPass)
+	sftp, _ := newSftp(os.Getenv("SFTP_HOST"), os.Getenv("SFTP_USER"), os.Getenv("SFTP_PASS"), "")
+	testFileSystem(t, sftp)
+}
 
+func TestHDFS2(t *testing.T) {
+	if os.Getenv("HDFS_ADDR") == "" {
+		t.Skip()
+	}
+	dfs, _ := newHDFS(os.Getenv("HDFS_ADDR"), "", "", "")
+	testFileSystem(t, dfs)
+}
+
+func testFileSystem(t *testing.T, s ObjectStorage) {
 	keys := []string{
 		"x/",
 		"x/x.txt",
@@ -117,48 +74,78 @@ func TestFsSftp(t *testing.T) {
 	}
 	// initialize directory tree
 	for _, key := range keys {
-		if err := s0.Put(key, bytes.NewReader([]byte{})); err != nil {
+		if err := s.Put(key, bytes.NewReader([]byte{})); err != nil {
 			t.Fatalf("PUT object `%s` failed: %q", key, err)
 		}
+	}
+	if o, err := s.Head("x/"); err != nil {
+		t.Fatalf("Head x/: %s", err)
+	} else if f, ok := o.(File); !ok {
+		t.Fatalf("Head should return File")
+	} else if !f.IsDir() {
+		t.Fatalf("x/ should be a dir")
 	}
 	// cleanup
 	defer func() {
 		// delete reversely, directory only can be deleted when it's empty
-		idx := len(keys) - 1
+		objs, err := listAll(s, "", "", 100)
+		if err != nil {
+			t.Fatalf("listall failed: %s", err)
+		}
+		gottenKeys := make([]string, len(objs))
+		for idx, obj := range objs {
+			gottenKeys[idx] = obj.Key()
+		}
+		idx := len(gottenKeys) - 1
 		for ; idx >= 0; idx-- {
-			if err := s0.Delete(keys[idx]); err != nil {
-				t.Fatalf("DELETE object `%s` failed: %q", keys[idx], err)
+			if err := s.Delete(gottenKeys[idx]); err != nil {
+				t.Fatalf("DELETE object `%s` failed: %q", gottenKeys[idx], err)
 			}
 		}
 	}()
-
-	s, _ := newSftp(sftpHost+"x/", sftpUser, sftpPass)
-	objs, err := listAll(s, "", "", 100)
+	objs, err := listAll(s, "x/", "", 100)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
-	expectedKeys := []string{"", "x.txt"}
+	expectedKeys := []string{"x/", "x/x.txt"}
 	if err = testKeysEqual(objs, expectedKeys); err != nil {
 		t.Fatalf("testKeysEqual fail: %s", err)
 	}
 
-	s, _ = newSftp(sftpHost+"x", sftpUser, sftpPass)
-	objs, err = listAll(s, "", "", 100)
+	objs, err = listAll(s, "x", "", 100)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
-	expectedKeys = []string{"/", "/x.txt", "y.txt", "yz/", "yz/xyz.txt"}
+	expectedKeys = []string{"x/", "x/x.txt", "xy.txt", "xyz/", "xyz/xyz.txt"}
 	if err = testKeysEqual(objs, expectedKeys); err != nil {
 		t.Fatalf("testKeysEqual fail: %s", err)
 	}
 
-	s, _ = newSftp(sftpHost+"xy", sftpUser, sftpPass)
-	objs, err = listAll(s, "", "", 100)
+	objs, err = listAll(s, "xy", "", 100)
 	if err != nil {
 		t.Fatalf("list failed: %s", err)
 	}
-	expectedKeys = []string{".txt", "z/", "z/xyz.txt"}
+	expectedKeys = []string{"xy.txt", "xyz/", "xyz/xyz.txt"}
 	if err = testKeysEqual(objs, expectedKeys); err != nil {
 		t.Fatalf("testKeysEqual fail: %s", err)
+	}
+
+	if ss, ok := s.(SupportSymlink); ok {
+		// a< a- < a/ < a0    <    b< b- < b/ < b0
+		_ = s.Put("a-", bytes.NewReader([]byte{}))
+		_ = s.Put("a0", bytes.NewReader([]byte{}))
+		_ = s.Put("b-", bytes.NewReader([]byte{}))
+		_ = s.Put("b0", bytes.NewReader([]byte{}))
+		_ = s.Put("xyz/ol1/p.txt", bytes.NewReader([]byte{}))
+		_ = ss.Symlink("./xyz/ol1/", "a")
+		_ = ss.Symlink("./xyz/notExist/", "b")
+		objs, err = listAll(s, "", "", 100)
+		if err != nil {
+			t.Fatalf("listall failed: %s", err)
+		}
+		expectedKeys = []string{"", "a-", "a/", "a/p.txt", "a0", "b", "b-", "b0", "x/", "x/x.txt", "xy.txt", "xyz/", "xyz/ol1/", "xyz/ol1/p.txt", "xyz/xyz.txt"}
+		if err = testKeysEqual(objs, expectedKeys); err != nil {
+			t.Fatalf("testKeysEqual fail: %s", err)
+		}
 	}
 }

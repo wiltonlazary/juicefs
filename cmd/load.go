@@ -1,58 +1,92 @@
 /*
- * JuiceFS, Copyright (C) 2021 Juicedata, Inc.
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-package main
+package cmd
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/juicedata/juicefs/pkg/meta"
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/urfave/cli/v2"
 )
 
-func load(ctx *cli.Context) error {
-	setLoggerLevel(ctx)
-	if ctx.Args().Len() < 1 {
-		return fmt.Errorf("META-URL is needed")
+func cmdLoad() *cli.Command {
+	return &cli.Command{
+		Name:      "load",
+		Action:    load,
+		Category:  "ADMIN",
+		Usage:     "Load metadata from a previously dumped JSON file",
+		ArgsUsage: "META-URL [FILE]",
+		Description: `
+Load metadata into an empty metadata engine.
+
+WARNING: Do NOT use new engine and the old one at the same time, otherwise it will probably break
+consistency of the volume.
+
+Examples:
+$ juicefs load redis://localhost/1 meta-dump.json.gz
+
+Details: https://juicefs.com/docs/community/metadata_dump_load`,
 	}
-	var fp io.ReadCloser
+}
+
+func load(ctx *cli.Context) error {
+	setup(ctx, 1)
+	metaUri := ctx.Args().Get(0)
+	src := ctx.Args().Get(1)
+	removePassword(metaUri)
+	var r io.ReadCloser
 	if ctx.Args().Len() == 1 {
-		fp = os.Stdin
+		r = os.Stdin
+		src = "STDIN"
 	} else {
-		var err error
-		fp, err = os.Open(ctx.Args().Get(1))
+		fp, err := os.Open(src)
 		if err != nil {
 			return err
 		}
 		defer fp.Close()
+		if strings.HasSuffix(src, ".gz") {
+			r, err = gzip.NewReader(fp)
+			if err != nil {
+				return err
+			}
+			defer r.Close()
+		} else {
+			r = fp
+		}
 	}
-	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true})
-	if err := m.LoadMeta(fp); err != nil {
+	m := meta.NewClient(metaUri, &meta.Config{Retries: 10, Strict: true})
+	if format, err := m.Load(false); err == nil {
+		return fmt.Errorf("Database %s is used by volume %s", utils.RemovePassword(metaUri), format.Name)
+	}
+	if err := m.LoadMeta(r); err != nil {
 		return err
 	}
-	logger.Infof("Load metadata from %s succeed", ctx.Args().Get(1))
-	return nil
-}
-
-func loadFlags() *cli.Command {
-	return &cli.Command{
-		Name:      "load",
-		Usage:     "load metadata from a previously dumped JSON file",
-		ArgsUsage: "META-URL [FILE]",
-		Action:    load,
+	if format, err := m.Load(true); err == nil {
+		if format.SecretKey == "removed" {
+			logger.Warnf("Secret key was removed; please correct it with `config` command")
+		}
+	} else {
+		return err
 	}
+	logger.Infof("Load metadata from %s succeed", src)
+	return nil
 }

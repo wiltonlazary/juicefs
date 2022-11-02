@@ -1,18 +1,20 @@
+//go:build !nos3
 // +build !nos3
 
 /*
- * JuiceFS, Copyright (C) 2018 Juicedata, Inc.
+ * JuiceFS, Copyright 2018 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -22,11 +24,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
+	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/ks3sdklib/aws-sdk-go/aws"
+	"github.com/ks3sdklib/aws-sdk-go/aws/awserr"
 	"github.com/ks3sdklib/aws-sdk-go/aws/credentials"
 	"github.com/ks3sdklib/aws-sdk-go/service/s3"
 )
@@ -40,6 +48,7 @@ type ks3 struct {
 func (s *ks3) String() string {
 	return fmt.Sprintf("ks3://%s/", s.bucket)
 }
+
 func (s *ks3) Create() error {
 	_, err := s.s3.CreateBucket(&s3.CreateBucketInput{Bucket: &s.bucket})
 	if err != nil && isExists(err) {
@@ -56,6 +65,9 @@ func (s *ks3) Head(key string) (Object, error) {
 
 	r, err := s.s3.HeadObject(&param)
 	if err != nil {
+		if e, ok := err.(awserr.RequestFailure); ok && e.StatusCode() == http.StatusNotFound {
+			err = os.ErrNotExist
+		}
 		return nil, err
 	}
 
@@ -96,10 +108,12 @@ func (s *ks3) Put(key string, in io.Reader) error {
 		}
 		body = bytes.NewReader(data)
 	}
+	mimeType := utils.GuessMimeType(key)
 	params := &s3.PutObjectInput{
-		Bucket: &s.bucket,
-		Key:    &key,
-		Body:   body,
+		Bucket:      &s.bucket,
+		Key:         &key,
+		Body:        body,
+		ContentType: &mimeType,
 	}
 	_, err := s.s3.PutObject(params)
 	return err
@@ -121,15 +135,19 @@ func (s *ks3) Delete(key string) error {
 		Key:    &key,
 	}
 	_, err := s.s3.DeleteObject(&param)
+	if e, ok := err.(awserr.RequestFailure); ok && e.StatusCode() == http.StatusNotFound {
+		return nil
+	}
 	return err
 }
 
-func (s *ks3) List(prefix, marker string, limit int64) ([]Object, error) {
+func (s *ks3) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	param := s3.ListObjectsInput{
-		Bucket:  &s.bucket,
-		Prefix:  &prefix,
-		Marker:  &marker,
-		MaxKeys: &limit,
+		Bucket:    &s.bucket,
+		Prefix:    &prefix,
+		Marker:    &marker,
+		MaxKeys:   &limit,
+		Delimiter: &delimiter,
 	}
 	resp, err := s.s3.ListObjects(&param)
 	if err != nil {
@@ -140,6 +158,12 @@ func (s *ks3) List(prefix, marker string, limit int64) ([]Object, error) {
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
 		objs[i] = &obj{*o.Key, *o.Size, *o.LastModified, strings.HasSuffix(*o.Key, "/")}
+	}
+	if delimiter != "" {
+		for _, p := range resp.CommonPrefixes {
+			objs = append(objs, &obj{*p.Prefix, 0, time.Unix(0, 0), true})
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
 	return objs, nil
 }
@@ -236,16 +260,24 @@ var ks3Regions = map[string]string{
 	"sgp":          "SINGAPORE",
 }
 
-func newKS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newKS3(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	uri, _ := url.ParseRequestURI(endpoint)
 	ssl := strings.ToLower(uri.Scheme) == "https"
 	hostParts := strings.Split(uri.Host, ".")
 	bucket := hostParts[0]
 	region := hostParts[1][3:]
 	region = strings.TrimLeft(region, "-")
-	if strings.HasSuffix(uri.Host, "ksyun.com") {
+	if strings.HasSuffix(uri.Host, "ksyun.com") || strings.HasSuffix(uri.Host, "ksyuncs.com") {
 		region = strings.TrimSuffix(region, "-internal")
 		region = ks3Regions[region]
+	} else if envRegion := os.Getenv("AWS_REGION"); envRegion != "" {
+		region = envRegion
+	}
+	if region == "" {
+		region = "us-east-1"
 	}
 
 	var err error
@@ -263,7 +295,7 @@ func newKS3(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
 		DisableSSL:       !ssl,
 		HTTPClient:       httpClient,
 		S3ForcePathStyle: true,
-		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, token),
 	}
 
 	return &ks3{bucket, s3.New(awsConfig), nil}, nil

@@ -1,4 +1,21 @@
-// Copyright (C) 2018-present Juicedata Inc.
+//go:build !noufile
+// +build !noufile
+
+/*
+ * JuiceFS, Copyright 2021 Juicedata, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package object
 
@@ -183,7 +200,10 @@ type uFileListObjectsOutput struct {
 	DataSet []*DataItem `json:"DataSet,omitempty"`
 }
 
-func (u *ufile) List(prefix, marker string, limit int64) ([]Object, error) {
+func (u *ufile) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
+	if delimiter != "" {
+		return nil, notSupportedDelimiter
+	}
 	query := url.Values{}
 	query.Add("list", "")
 	query.Add("prefix", prefix)
@@ -228,7 +248,7 @@ func (u *ufile) CreateMultipartUpload(key string) (*MultipartUpload, error) {
 }
 
 func (u *ufile) UploadPart(key string, uploadID string, num int, data []byte) (*Part, error) {
-	// UFile require the PartNumber to start from 0 (continious)
+	// UFile require the PartNumber to start from 0 (continuous)
 	num--
 	path := fmt.Sprintf("%s?uploadId=%s&partNumber=%d", key, uploadID, num)
 	resp, err := u.request("PUT", path, bytes.NewReader(data), nil)
@@ -304,7 +324,10 @@ func (u *ufile) ListUploads(marker string) ([]*PendingPart, string, error) {
 	return parts, out.NextMarker, nil
 }
 
-func newUFile(endpoint, accessKey, secretKey string) (ObjectStorage, error) {
+func newUFile(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) {
+	if !strings.Contains(endpoint, "://") {
+		endpoint = fmt.Sprintf("https://%s", endpoint)
+	}
 	return &ufile{RestfulStorage{DefaultObjectStorage{}, endpoint, accessKey, secretKey, "UCloud", ufileSigner}}, nil
 }
 

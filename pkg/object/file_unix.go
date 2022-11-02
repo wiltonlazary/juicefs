@@ -1,18 +1,20 @@
+//go:build !windows
 // +build !windows
 
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package object
@@ -38,8 +40,11 @@ func userName(uid int) string {
 	if !ok {
 		if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
 			name = u.Username
-			uids[uid] = name
+		} else {
+			logger.Warnf("lookup uid %d: %s", uid, err)
+			name = strconv.Itoa(uid)
 		}
+		uids[uid] = name
 	}
 	return name
 }
@@ -49,8 +54,11 @@ func groupName(gid int) string {
 	if !ok {
 		if g, err := user.LookupGroupId(strconv.Itoa(gid)); err == nil {
 			name = g.Name
-			gids[gid] = name
+		} else {
+			logger.Warnf("lookup gid %d: %s", gid, err)
+			name = strconv.Itoa(gid)
 		}
+		gids[gid] = name
 	}
 	return name
 }
@@ -79,6 +87,12 @@ func lookupUser(name string) int {
 	var uid = -1
 	if u, err := user.Lookup(name); err == nil {
 		uid, _ = strconv.Atoi(u.Uid)
+	} else {
+		if g, e := strconv.Atoi(name); e == nil {
+			uid = g
+		} else {
+			logger.Warnf("lookup user %s: %s", name, err)
+		}
 	}
 	users[name] = uid
 	return uid
@@ -93,6 +107,12 @@ func lookupGroup(name string) int {
 	var gid = -1
 	if u, err := user.LookupGroup(name); err == nil {
 		gid, _ = strconv.Atoi(u.Gid)
+	} else {
+		if g, e := strconv.Atoi(name); e == nil {
+			gid = g
+		} else {
+			logger.Warnf("lookup group %s: %s", name, err)
+		}
 	}
 	groups[name] = gid
 	return gid

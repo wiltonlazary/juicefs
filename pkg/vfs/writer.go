@@ -1,16 +1,17 @@
 /*
- * JuiceFS, Copyright (C) 2020 Juicedata, Inc.
+ * JuiceFS, Copyright 2020 Juicedata, Inc.
  *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package vfs
@@ -68,7 +69,7 @@ func (s *sliceWriter) prepareID(ctx meta.Context, retry bool) {
 	for s.id == 0 {
 		var id uint64
 		f.Unlock()
-		st := f.w.m.NewChunk(ctx, f.inode, s.chunk.indx, s.off, &id)
+		st := f.w.m.NewSlice(ctx, &id)
 		f.Lock()
 		if st != 0 && st != syscall.EIO {
 			s.err = st
@@ -196,7 +197,7 @@ func (c *chunkWriter) commitThread() {
 		f.Unlock()
 
 		if err == 0 {
-			var ss = meta.Slice{Chunkid: s.id, Size: s.length, Off: s.soff, Len: s.slen}
+			var ss = meta.Slice{Id: s.id, Size: s.length, Off: s.soff, Len: s.slen}
 			err = f.w.m.Write(meta.Background, f.inode, c.indx, s.off, ss)
 			f.w.reader.Invalidate(f.inode, uint64(c.indx)*meta.ChunkSize+uint64(s.off), uint64(ss.Len))
 		}
@@ -342,7 +343,7 @@ func (f *fileWriter) flush(ctx meta.Context, writeback bool) syscall.Errno {
 	f.flushwaiting++
 
 	var err syscall.Errno
-	var wait = time.Second * time.Duration((f.w.maxRetries+1)*(f.w.maxRetries+1)/2)
+	var wait = time.Second * time.Duration((f.w.maxRetries+2)*(f.w.maxRetries+2)/2)
 	if wait < time.Minute*5 {
 		wait = time.Minute * 5
 	}
@@ -356,7 +357,7 @@ func (f *fileWriter) flush(ctx meta.Context, writeback bool) syscall.Errno {
 				}
 			}
 		}
-		if f.flushcond.WaitWithTimeout(time.Second*3) && ctx.Canceled() {
+		if f.flushcond.WaitWithTimeout(time.Second*3) && ctx.Canceled() && time.Since(s) > f.w.conf.Chunk.PutTimeout*2 {
 			logger.Warnf("flush %d interrupted after %d", f.inode, time.Since(s))
 			err = syscall.EINTR
 			break
@@ -411,6 +412,7 @@ type dataWriter struct {
 	sync.Mutex
 	m          meta.Meta
 	store      chunk.ChunkStore
+	conf       *Config
 	reader     DataReader
 	blockSize  int
 	bufferSize int64
@@ -423,6 +425,7 @@ func NewDataWriter(conf *Config, m meta.Meta, store chunk.ChunkStore, reader Dat
 		m:          m,
 		store:      store,
 		reader:     reader,
+		conf:       conf,
 		blockSize:  conf.Chunk.BlockSize,
 		bufferSize: int64(conf.Chunk.BufferSize),
 		files:      make(map[Ino]*fileWriter),
