@@ -43,6 +43,7 @@ type kvTxn interface {
 	gets(keys ...[]byte) [][]byte
 	scanRange(begin, end []byte) map[string][]byte
 	scanKeys(prefix []byte) [][]byte
+	scanKeysRange(begin, end []byte, limit int, filter func(k []byte) bool) [][]byte
 	scanValues(prefix []byte, limit int, filter func(k, v []byte) bool) map[string][]byte
 	exist(prefix []byte) bool
 	set(key, value []byte)
@@ -88,8 +89,7 @@ func newKVMeta(driver, addr string, conf *Config) (Meta, error) {
 		client:   client,
 	}
 	m.en = m
-	m.root, err = lookupSubdir(m, conf.Subdir)
-	return m, err
+	return m, nil
 }
 
 func (m *kvMeta) Shutdown() error {
@@ -327,7 +327,7 @@ func (m *kvMeta) scanValues(prefix []byte, limit int, filter func(k, v []byte) b
 	return values, err
 }
 
-func (m *kvMeta) Init(format Format, force bool) error {
+func (m *kvMeta) Init(format *Format, force bool) error {
 	body, err := m.get(m.fmtKey("setting"))
 	if err != nil {
 		return err
@@ -1208,7 +1208,7 @@ func (m *kvMeta) doUnlink(ctx Context, parent Ino, name string) syscall.Errno {
 	}, parent)
 	if err == nil && trash == 0 {
 		if _type == TypeFile && attr.Nlink == 0 {
-			m.fileDeleted(opened, inode, attr.Length)
+			m.fileDeleted(opened, isTrash(parent), inode, attr.Length)
 		}
 		m.updateStats(newSpace, newInode)
 	}
@@ -1509,7 +1509,7 @@ func (m *kvMeta) doRename(ctx Context, parentSrc Ino, nameSrc string, parentDst 
 	}, parentSrc)
 	if err == nil && !exchange && trash == 0 {
 		if dino > 0 && dtyp == TypeFile && tattr.Nlink == 0 {
-			m.fileDeleted(opened, dino, tattr.Length)
+			m.fileDeleted(opened, false, dino, tattr.Length)
 		}
 		m.updateStats(newSpace, newInode)
 	}
@@ -1667,7 +1667,7 @@ func (m *kvMeta) doDeleteSustainedInode(sid uint64, inode Ino) error {
 	})
 	if err == nil {
 		m.updateStats(newSpace, -1)
-		m.tryDeleteFileData(inode, attr.Length)
+		m.tryDeleteFileData(inode, attr.Length, false)
 	}
 	return err
 }
@@ -1970,52 +1970,52 @@ func (m *kvMeta) doDeleteFileData(inode Ino, length uint64) {
 	_ = m.deleteKeys(m.delfileKey(inode, length))
 }
 
-func (m *kvMeta) doCleanupDelayedSlices(edge int64, limit int) (int, error) {
-	var keys [][]byte
-	if err := m.client.txn(func(tx kvTxn) error {
-		vals := tx.scanRange(m.delSliceKey(0, 0), m.delSliceKey(edge, 0))
-		for k := range vals {
-			if len(k) != 1+8+8 { // delayed slices: Lttttttttcccccccc
-				continue
-			}
-			keys = append(keys, []byte(k))
-		}
-		return nil
-	}); err != nil {
-		logger.Warnf("Scan delayed slices: %s", err)
-		return 0, err
-	}
-
+func (m *kvMeta) doCleanupDelayedSlices(edge int64) (int, error) {
+	start := time.Now()
 	var count int
 	var ss []Slice
 	var rs []int64
-	for _, key := range keys {
-		if err := m.txn(func(tx kvTxn) error {
-			ss, rs = ss[:0], rs[:0]
-			buf := tx.get(key)
-			if len(buf) == 0 {
-				return nil
-			}
-			m.decodeDelayedSlices(buf, &ss)
-			if len(ss) == 0 {
-				return fmt.Errorf("invalid value for delayed slices %s: %v", key, buf)
-			}
-			for _, s := range ss {
-				rs = append(rs, tx.incrBy(m.sliceKey(s.Id, s.Size), -1))
-			}
-			tx.dels(key)
+	var keys [][]byte
+	var batch int = 1e5
+	for {
+		if err := m.client.txn(func(tx kvTxn) error {
+			keys = tx.scanKeysRange(m.delSliceKey(0, 0), m.delSliceKey(edge, 0), batch, func(k []byte) bool {
+				return len(k) == 1+8+8 // delayed slices: Lttttttttcccccccc
+			})
 			return nil
 		}); err != nil {
-			logger.Warnf("Cleanup delayed slices %s: %s", key, err)
-			continue
+			logger.Warnf("Scan delayed slices: %s", err)
+			return count, err
 		}
-		for i, s := range ss {
-			if rs[i] < 0 {
-				m.deleteSlice(s.Id, s.Size)
-				count++
+
+		for _, key := range keys {
+			if err := m.txn(func(tx kvTxn) error {
+				ss, rs = ss[:0], rs[:0]
+				buf := tx.get(key)
+				if len(buf) == 0 {
+					return nil
+				}
+				m.decodeDelayedSlices(buf, &ss)
+				if len(ss) == 0 {
+					return fmt.Errorf("invalid value for delayed slices %s: %v", key, buf)
+				}
+				for _, s := range ss {
+					rs = append(rs, tx.incrBy(m.sliceKey(s.Id, s.Size), -1))
+				}
+				tx.dels(key)
+				return nil
+			}); err != nil {
+				logger.Warnf("Cleanup delayed slices %s: %s", key, err)
+				continue
+			}
+			for i, s := range ss {
+				if rs[i] < 0 {
+					m.deleteSlice(s.Id, s.Size)
+					count++
+				}
 			}
 		}
-		if count >= limit {
+		if len(keys) < batch || time.Since(start) > 50*time.Minute {
 			break
 		}
 	}
@@ -2152,27 +2152,19 @@ func (m *kvMeta) compactChunk(inode Ino, indx uint32, force bool) {
 	}
 }
 
-func (r *kvMeta) CompactAll(ctx Context, bar *utils.Bar) syscall.Errno {
+func (m *kvMeta) scanAllChunks(ctx Context, ch chan<- cchunk, bar *utils.Bar) error {
 	// AiiiiiiiiCnnnn     file chunks
 	klen := 1 + 8 + 1 + 4
-	result, err := r.scanValues(r.fmtKey("A"), -1, func(k, v []byte) bool {
-		return len(k) == klen && k[1+8] == 'C' && len(v) > sliceBytes
+	return m.client.scan(m.fmtKey("A"), func(k, v []byte) {
+		if len(k) == klen && k[1+8] == 'C' && len(v) > sliceBytes {
+			bar.IncrTotal(1)
+			ch <- cchunk{
+				inode:  m.decodeInode(k[1:9]),
+				indx:   binary.BigEndian.Uint32(k[10:]),
+				slices: len(v) / sliceBytes,
+			}
+		}
 	})
-	if err != nil {
-		logger.Warnf("scan chunks: %s", err)
-		return errno(err)
-	}
-
-	bar.IncrTotal(int64(len(result)))
-	for k, value := range result {
-		key := []byte(k[1:])
-		inode := r.decodeInode(key[:8])
-		indx := binary.BigEndian.Uint32(key[9:])
-		logger.Debugf("compact chunk %d:%d (%d slices)", inode, indx, len(value)/sliceBytes)
-		r.compactChunk(inode, indx, true)
-		bar.Increment()
-	}
-	return 0
 }
 
 func (m *kvMeta) ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, showProgress func()) syscall.Errno {
@@ -2208,31 +2200,102 @@ func (m *kvMeta) ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, sh
 		return 0
 	}
 
-	// delayed slices: Lttttttttcccccccc
-	klen = 1 + 8 + 8
-	result, err = m.scanValues(m.fmtKey("L"), -1, func(k, v []byte) bool {
-		return len(k) == klen
-	})
-	if err != nil {
-		logger.Warnf("Scan delayed slices: %s", err)
-		return errno(err)
-	}
-	var ss []Slice
-	for _, value := range result {
-		ss = ss[:0]
-		m.decodeDelayedSlices(value, &ss)
+	return errno(m.scanDeletedSlices(ctx, func(ss []Slice, _ int64) (bool, error) {
+		slices[1] = append(slices[1], ss...)
 		if showProgress != nil {
 			for range ss {
 				showProgress()
 			}
 		}
-		for _, s := range ss {
-			if s.Id > 0 {
-				slices[1] = append(slices[1], s)
+		return false, nil
+	}))
+}
+
+func (m *kvMeta) scanDeletedSlices(ctx Context, scan deletedSliceScan) error {
+	if scan == nil {
+		return nil
+	}
+
+	// delayed slices: Lttttttttcccccccc
+	klen := 1 + 8 + 8
+	keys, err := m.scanKeys(m.fmtKey("L"))
+	if err != nil {
+		return err
+	}
+
+	var ss []Slice
+	var rs []int64
+	for _, key := range keys {
+		if len(key) != klen {
+			continue
+		}
+		var clean bool
+		err = m.txn(func(tx kvTxn) error {
+			ss := ss[:0]
+			rs := rs[:0]
+			v := tx.get(key)
+			if len(v) == 0 {
+				return nil
+			}
+			b := utils.ReadBuffer([]byte(key)[1:])
+			ts := b.Get64()
+			m.decodeDelayedSlices(v, &ss)
+			clean, err = scan(ss, int64(ts))
+			if err != nil {
+				return err
+			}
+			if clean {
+				for _, s := range ss {
+					rs = append(rs, tx.incrBy(m.sliceKey(s.Id, s.Size), -1))
+				}
+				tx.dels(key)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if clean && len(rs) == len(ss) {
+			for i, s := range ss {
+				if rs[i] < 0 {
+					m.deleteSlice(s.Id, s.Size)
+				}
 			}
 		}
+
 	}
-	return 0
+	return nil
+}
+
+func (m *kvMeta) scanDeletedFiles(ctx Context, scan deletedFileScan) error {
+	if scan == nil {
+		return nil
+	}
+	// deleted files: Diiiiiiiissssssss
+	klen := 1 + 8 + 8
+	pairs, err := m.scanValues(m.fmtKey("D"), -1, func(k, v []byte) bool {
+		return len(k) == klen
+	})
+	if err != nil {
+		return err
+	}
+
+	for key, value := range pairs {
+		if len(key) != klen {
+			return fmt.Errorf("invalid key %x", key)
+		}
+		ino := m.decodeInode([]byte(key)[1:9])
+		size := binary.BigEndian.Uint64([]byte(key)[9:])
+		ts := m.parseInt64(value)
+		clean, err := scan(ino, size, ts)
+		if err != nil {
+			return err
+		}
+		if clean {
+			m.doDeleteFileData(ino, size)
+		}
+	}
+	return nil
 }
 
 func (m *kvMeta) doRepair(ctx Context, inode Ino, attr *Attr) syscall.Errno {
@@ -2595,7 +2658,7 @@ func (m *kvMeta) DumpMeta(w io.Writer, root Ino, keepSecret bool) (err error) {
 	}
 
 	dm := DumpedMeta{
-		Setting: m.fmt,
+		Setting: *m.fmt,
 		Counters: &DumpedCounters{
 			UsedSpace:   cs[0],
 			UsedInodes:  cs[1],

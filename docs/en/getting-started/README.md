@@ -2,6 +2,7 @@
 sidebar_label: Quick Start (Standalone Mode)
 sidebar_position: 2
 slug: /quick_start_guide
+pagination_next: getting-started/for_distributed
 ---
 
 # Quick Start Guide for Standalone Mode
@@ -20,11 +21,11 @@ Other operating systems and installation methods, please refer to ["Installation
 
 A help message will return after executing `juicefs` in terminal once the JuiceFS client is successfully installed regardless of operating system.
 
-## Creating a File System
+## Creating a File System {#juicefs-format}
 
 ### Basic Concept
 
-JuiceFS client provides a command [`format`](../reference/command_reference.md#juicefs-format) to create a file system as follows.
+JuiceFS client provides a command [`format`](../reference/command_reference.md#format) to create a file system as follows.
 
 ```shell
 juicefs format [command options] META-URL NAME
@@ -68,7 +69,7 @@ Since no storage-related options are specified in this example, the local disk i
 
 ### Basic Concept
 
-JuiceFS client provides a command [`mount`](../reference/command_reference.md#juicefs-mount) to mount file systems in the following format.
+JuiceFS client provides a command [`mount`](../reference/command_reference.md#mount) to mount file systems in the following format.
 
 ```shell
 juicefs mount [command options] META-URL MOUNTPOINT
@@ -76,12 +77,12 @@ juicefs mount [command options] META-URL MOUNTPOINT
 
 Similar to the command of creating a file system, the following information is also required to mount a file system.
 
-1. **[command options]**: used to specify file system-related options, e.g. `-d` enables background mounts.
-2. **META-URL**: used to set up the metadata storage, usually a URL or file path of a database.
-3. **MOUNTPOINT**: used to specific a mount point of the file system.
+1. `[command options]`: used to specify file system-related options, e.g. `-d` enables background mounts.
+2. `META-URL`: used to set up the metadata storage, usually a URL or file path of a database.
+3. `MOUNTPOINT`: used to specific a mount point of the file system.
 
 :::tip
-The mount point (MOUNTPOINT) on Windows systems should use a disk letter that is not yet occupied, e.g. `Z:`, `Y:`.
+The mount point (`MOUNTPOINT`) on Windows systems should use a disk letter that is not yet occupied, e.g. `Z:`, `Y:`.
 :::
 
 ### Hands-on Practice
@@ -106,7 +107,7 @@ In order to keep the file system mounted in the background, you can specify the 
 juicefs mount sqlite3://myjfs.db ~/jfs -d
 ```
 
-Next, any files stored in the mount point `~/jfs` will be split into specific blocks according to [How JuiceFS Stores Files](../introduction/architecture.md#how-juicefs-stores-files), and stored in `$HOME/.juicefs/local/myjfs` directory; the corresponding metadata will be stored in the `myjfs.db` database.
+Next, any files stored in the mount point `~/jfs` will be split into specific blocks according to [How JuiceFS Stores Files](../introduction/architecture.md#how-juicefs-store-files), and stored in `$HOME/.juicefs/local/myjfs` directory; the corresponding metadata will be stored in the `myjfs.db` database.
 
 In the end, the mount point `~/jfs` can be unmounted by executing the following command.
 
@@ -116,7 +117,7 @@ juicefs umount ~/jfs
 
 ## Go Further
 
-The above exercise only helps you to have a quick experience with JuiceFS locally and gives you a basic overview of how JucieFS works. To make the example more practical, we can take a step further by using SQLite to store metadata as above but replacing the local storage with "object storage".
+The above exercise only helps you to have a quick experience with JuiceFS locally and gives you a basic overview of how JuiceFS works. To make the example more practical, we can take a step further by using SQLite to store metadata as above but replacing the local storage with "object storage".
 
 ### Object Storage
 

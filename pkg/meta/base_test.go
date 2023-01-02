@@ -15,6 +15,7 @@
  */
 
 //nolint:errcheck
+//disable_mutate_test
 package meta
 
 import (
@@ -64,6 +65,7 @@ func testMeta(t *testing.T, m Meta) {
 	testRemove(t, m)
 	testStickyBit(t, m)
 	testLocks(t, m)
+	testListLocks(t, m)
 	testConcurrentWrite(t, m)
 	testCompaction(t, m, false)
 	time.Sleep(time.Second)
@@ -91,10 +93,10 @@ func testMetaClient(t *testing.T, m Meta) {
 		t.Fatalf("getattr root: %s", st)
 	}
 
-	if err := m.Init(Format{Name: "test"}, true); err != nil {
+	if err := m.Init(&Format{Name: "test"}, true); err != nil {
 		t.Fatalf("initialize failed: %s", err)
 	}
-	if err := m.Init(Format{Name: "test2"}, false); err == nil { // not allowed
+	if err := m.Init(&Format{Name: "test2"}, false); err == nil { // not allowed
 		t.Fatalf("change name without --force is not allowed")
 	}
 	format, err := m.Load(true)
@@ -475,7 +477,7 @@ func testMetaClient(t *testing.T, m Meta) {
 	}
 	format.Capacity = 1 << 20
 	format.Inodes = 100
-	if err = m.Init(*format, false); err != nil {
+	if err = m.Init(format, false); err != nil {
 		t.Fatalf("set quota failed: %s", err)
 	}
 	if st := m.StatFS(ctx, &totalspace, &availspace, &iused, &iavail); st != 0 {
@@ -530,7 +532,7 @@ func testMetaClient(t *testing.T, m Meta) {
 }
 
 func testStickyBit(t *testing.T, m Meta) {
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 	ctx := Background
 	var sticky, normal, inode Ino
 	var attr = &Attr{}
@@ -596,8 +598,83 @@ func testStickyBit(t *testing.T, m Meta) {
 	}
 }
 
+func testListLocks(t *testing.T, m Meta) {
+	_ = m.Init(&Format{Name: "test"}, false)
+	ctx := Background
+	var inode Ino
+	var attr = &Attr{}
+	defer m.Unlink(ctx, 1, "f")
+	if st := m.Create(ctx, 1, "f", 0644, 0, 0, &inode, attr); st != 0 {
+		t.Fatalf("create f: %s", st)
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+
+	// flock
+	o1 := uint64(0xF000000000000001)
+	if st := m.Flock(ctx, inode, o1, syscall.F_WRLCK, false); st != 0 {
+		t.Fatalf("flock wlock: %s", st)
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 1 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	if st := m.Flock(ctx, inode, o1, syscall.F_UNLCK, false); st != 0 {
+		t.Fatalf("flock unlock: %s", st)
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	for i := 2; i < 10; i++ {
+		if st := m.Flock(ctx, inode, uint64(i), syscall.F_RDLCK, false); st != 0 {
+			t.Fatalf("flock wlock: %s", st)
+		}
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 8 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	for i := 2; i < 10; i++ {
+		if st := m.Flock(ctx, inode, uint64(i), syscall.F_UNLCK, false); st != 0 {
+			t.Fatalf("flock unlock: %s", st)
+		}
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+
+	// plock
+	if st := m.Setlk(ctx, inode, o1, false, syscall.F_WRLCK, 0, 0xFFFF, 1); st != 0 {
+		t.Fatalf("plock rlock: %s", st)
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 1 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	if st := m.Setlk(ctx, inode, o1, false, syscall.F_UNLCK, 0, 0xFFFF, 1); st != 0 {
+		t.Fatalf("plock unlock: %s", st)
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	for i := 2; i < 10; i++ {
+		if st := m.Setlk(ctx, inode, uint64(i), false, syscall.F_RDLCK, 0, 0xFFFF, 1); st != 0 {
+			t.Fatalf("plock rlock: %s", st)
+		}
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 8 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+	for i := 2; i < 10; i++ {
+		if st := m.Setlk(ctx, inode, uint64(i), false, syscall.F_UNLCK, 0, 0xFFFF, 1); st != 0 {
+			t.Fatalf("plock unlock: %s", st)
+		}
+	}
+	if plocks, flocks, err := m.ListLocks(ctx, inode); err != nil || len(plocks) != 0 || len(flocks) != 0 {
+		t.Fatalf("list locks: %v %v %v", plocks, flocks, err)
+	}
+}
+
 func testLocks(t *testing.T, m Meta) {
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 	ctx := Background
 	var inode Ino
 	var attr = &Attr{}
@@ -607,6 +684,15 @@ func testLocks(t *testing.T, m Meta) {
 	}
 	// flock
 	o1 := uint64(0xF000000000000001)
+	if st := m.Flock(ctx, inode, o1, syscall.F_WRLCK, false); st != 0 {
+		t.Fatalf("flock wlock: %s", st)
+	}
+	if st := m.Flock(ctx, inode, o1, syscall.F_WRLCK, false); st != 0 {
+		t.Fatalf("flock wlock: %s", st)
+	}
+	if st := m.Flock(ctx, inode, o1, syscall.F_UNLCK, false); st != 0 {
+		t.Fatalf("flock unlock: %s", st)
+	}
 	if st := m.Flock(ctx, inode, o1, syscall.F_RDLCK, false); st != 0 {
 		t.Fatalf("flock rlock: %s", st)
 	}
@@ -644,6 +730,9 @@ func testLocks(t *testing.T, m Meta) {
 	// POSIX locks
 	if st := m.Setlk(ctx, inode, o1, false, syscall.F_UNLCK, 0, 0xFFFF, 1); st != 0 {
 		t.Fatalf("plock unlock: %s", st)
+	}
+	if st := m.Setlk(ctx, inode, o1, false, syscall.F_RDLCK, 0, 0xFFFF, 1); st != 0 {
+		t.Fatalf("plock rlock: %s", st)
 	}
 	if st := m.Setlk(ctx, inode, o1, false, syscall.F_RDLCK, 0, 0xFFFF, 1); st != 0 {
 		t.Fatalf("plock rlock: %s", st)
@@ -722,7 +811,7 @@ func testLocks(t *testing.T, m Meta) {
 }
 
 func testRemove(t *testing.T, m Meta) {
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 	ctx := Background
 	var inode, parent Ino
 	var attr = &Attr{}
@@ -764,7 +853,7 @@ func testRemove(t *testing.T, m Meta) {
 }
 
 func testCaseIncensi(t *testing.T, m Meta) {
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 	ctx := Background
 	var inode Ino
 	var attr = &Attr{}
@@ -813,9 +902,9 @@ type compactor interface {
 
 func testCompaction(t *testing.T, m Meta, trash bool) {
 	if trash {
-		_ = m.Init(Format{Name: "test", TrashDays: 1}, false)
+		_ = m.Init(&Format{Name: "test", TrashDays: 1}, false)
 	} else {
-		_ = m.Init(Format{Name: "test"}, false)
+		_ = m.Init(&Format{Name: "test"}, false)
 	}
 	var l sync.Mutex
 	deleted := make(map[uint64]int)
@@ -892,7 +981,7 @@ func testCompaction(t *testing.T, m Meta, trash bool) {
 
 	// TODO: check result if that's predictable
 	p, bar := utils.MockProgress()
-	if st := m.CompactAll(ctx, bar); st != 0 {
+	if st := m.CompactAll(ctx, 8, bar); st != 0 {
 		t.Fatalf("compactall: %s", st)
 	}
 	p.Done()
@@ -911,7 +1000,7 @@ func testCompaction(t *testing.T, m Meta, trash bool) {
 		if len(sliceMap[1]) < 200 {
 			t.Fatalf("list delayed slices %d is less than 200", len(sliceMap[1]))
 		}
-		m.(engine).doCleanupDelayedSlices(time.Now().Unix()+1, 1000)
+		m.(engine).doCleanupDelayedSlices(time.Now().Unix() + 1)
 		l.Lock()
 		deletes = len(deleted)
 		l.Unlock()
@@ -928,7 +1017,7 @@ func testConcurrentWrite(t *testing.T, m Meta) {
 	m.OnMsg(CompactChunk, func(args ...interface{}) error {
 		return nil
 	})
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 
 	ctx := Background
 	var inode Ino
@@ -970,7 +1059,7 @@ func testTruncateAndDelete(t *testing.T, m Meta) {
 	// remove quota
 	format, _ := m.Load(false)
 	format.Capacity = 0
-	_ = m.Init(*format, false)
+	_ = m.Init(format, false)
 
 	ctx := Background
 	var inode Ino
@@ -1031,7 +1120,7 @@ func testCopyFileRange(t *testing.T, m Meta) {
 	m.OnMsg(DeleteSlice, func(args ...interface{}) error {
 		return nil
 	})
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 
 	ctx := Background
 	var iin, iout Ino
@@ -1081,7 +1170,7 @@ func testCopyFileRange(t *testing.T, m Meta) {
 }
 
 func testCloseSession(t *testing.T, m Meta) {
-	_ = m.Init(Format{Name: "test"}, false)
+	_ = m.Init(&Format{Name: "test"}, false)
 	if err := m.NewSession(); err != nil {
 		t.Fatalf("new session: %s", err)
 	}
@@ -1140,7 +1229,7 @@ func testCloseSession(t *testing.T, m Meta) {
 }
 
 func testTrash(t *testing.T, m Meta) {
-	if err := m.Init(Format{Name: "test", TrashDays: 1}, false); err != nil {
+	if err := m.Init(&Format{Name: "test", TrashDays: 1}, false); err != nil {
 		t.Fatalf("init: %s", err)
 	}
 	ctx := Background
@@ -1236,7 +1325,7 @@ func testTrash(t *testing.T, m Meta) {
 }
 
 func testParents(t *testing.T, m Meta) {
-	if err := m.Init(Format{Name: "test"}, false); err != nil {
+	if err := m.Init(&Format{Name: "test"}, false); err != nil {
 		t.Fatalf("init: %s", err)
 	}
 	ctx := Background
@@ -1370,7 +1459,7 @@ func testConcurrentDir(t *testing.T, m Meta) {
 	format, err := m.Load(false)
 	format.Capacity = 0
 	format.Inodes = 0
-	if err = m.Init(*format, false); err != nil {
+	if err = m.Init(format, false); err != nil {
 		t.Fatalf("set quota failed: %s", err)
 	}
 	for i := 0; i < 100; i++ {
@@ -1729,6 +1818,6 @@ func testCheckAndRepair(t *testing.T, m Meta) {
 		t.Fatalf("getattr: %s", st)
 	}
 	if !dirAttr.Full || dirAttr.Nlink != 2 || dirAttr.Parent != d3Inode {
-		t.Fatalf("d4Inode attr: %+v", *dirAttr)
+		t.Fatalf("d4Inode  attr: %+v", *dirAttr)
 	}
 }

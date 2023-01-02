@@ -17,6 +17,7 @@
 package meta
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -41,10 +42,12 @@ const (
 	CompactChunk = 1001
 	// Rmr is a message to remove a directory recursively.
 	Rmr = 1002
-	// Info is a message to get the internal info for file or directory.
-	Info = 1003
+	// LegacyInfo is a message to get the internal info for file or directory.
+	LegacyInfo = 1003
 	// FillCache is a message to build cache for target directories/files
 	FillCache = 1004
+	// InfoV2 is a message to get the internal info for file or directory.
+	InfoV2 = 1005
 )
 
 const (
@@ -251,7 +254,7 @@ type Meta interface {
 	// Name of database
 	Name() string
 	// Init is used to initialize a meta service.
-	Init(format Format, force bool) error
+	Init(format *Format, force bool) error
 	// Shutdown close current database connections.
 	Shutdown() error
 	// Reset cleans up all metadata, VERY DANGEROUS!
@@ -266,8 +269,14 @@ type Meta interface {
 	GetSession(sid uint64, detail bool) (*Session, error)
 	// ListSessions returns all client sessions.
 	ListSessions() ([]*Session, error)
+	// ScanDeletedObject scan deleted objects by customized scanner.
+	ScanDeletedObject(Context, deletedSliceScan, deletedFileScan) error
+	// ListLocks returns all locks of a inode.
+	ListLocks(ctx context.Context, inode Ino) ([]PLockItem, []FLockItem, error)
 	// CleanStaleSessions cleans up sessions not active for more than 5 minutes
 	CleanStaleSessions()
+	// CleanupTrashBefore deletes all files in trash before the given time.
+	CleanupTrashBefore(ctx Context, edge time.Time, increProgress func())
 
 	// StatFS returns summary statistics of a volume.
 	StatFS(ctx Context, totalspace, availspace, iused, iavail *uint64) syscall.Errno
@@ -343,7 +352,7 @@ type Meta interface {
 	Setlk(ctx Context, inode Ino, owner uint64, block bool, ltype uint32, start, end uint64, pid uint32) syscall.Errno
 
 	// Compact all the chunks by merge small slices together
-	CompactAll(ctx Context, bar *utils.Bar) syscall.Errno
+	CompactAll(ctx Context, threads int, bar *utils.Bar) syscall.Errno
 	// ListSlices returns all slices used by all files.
 	ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, showProgress func()) syscall.Errno
 	// Remove all files and directories recursively.
@@ -352,9 +361,13 @@ type Meta interface {
 	GetPaths(ctx Context, inode Ino) []string
 	// Check integrity of an absolute path and repair it if asked
 	Check(ctx Context, fpath string, repair bool, recursive bool) syscall.Errno
+	// Change root to a directory specified by subdir
+	Chroot(ctx Context, subdir string) syscall.Errno
 
 	// OnMsg add a callback for the given message type.
 	OnMsg(mtype uint32, cb MsgCallback)
+	// OnReload register a callback for any change founded after reloaded.
+	OnReload(func(new *Format))
 
 	// Dump the tree under root, which may be modified by checkRoot
 	DumpMeta(w io.Writer, root Ino, keepSecret bool) error
@@ -415,7 +428,7 @@ func NewClient(uri string, conf *Config) Meta {
 	}
 	m, err := f(driver, uri[p+3:], conf)
 	if err != nil {
-		logger.Fatalf("Meta %s is not available: %s", uri, err)
+		logger.Fatalf("Meta %s is not available: %s", utils.RemovePassword(uri), err)
 	}
 	return m
 }

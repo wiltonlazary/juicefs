@@ -202,8 +202,7 @@ func newRedisMeta(driver, addr string, conf *Config) (Meta, error) {
 	}
 	m.en = m
 	m.checkServerConfig()
-	m.root, err = lookupSubdir(m, conf.Subdir)
-	return m, err
+	return m, nil
 }
 
 func (m *redisMeta) Shutdown() error {
@@ -218,7 +217,7 @@ func (m *redisMeta) Name() string {
 	return "redis"
 }
 
-func (m *redisMeta) Init(format Format, force bool) error {
+func (m *redisMeta) Init(format *Format, force bool) error {
 	ctx := Background
 	body, err := m.rdb.Get(ctx, m.setting()).Bytes()
 	if err != nil && err != redis.Nil {
@@ -1327,7 +1326,7 @@ func (m *redisMeta) doUnlink(ctx Context, parent Ino, name string) syscall.Errno
 	}, m.entryKey(parent), m.inodeKey(parent))
 	if err == nil && trash == 0 {
 		if _type == TypeFile && attr.Nlink == 0 {
-			m.fileDeleted(opened, inode, attr.Length)
+			m.fileDeleted(opened, isTrash(parent), inode, attr.Length)
 		}
 		m.updateStats(newSpace, newInode)
 	}
@@ -1673,7 +1672,7 @@ func (m *redisMeta) doRename(ctx Context, parentSrc Ino, nameSrc string, parentD
 	}, m.entryKey(parentSrc), m.inodeKey(parentSrc), m.entryKey(parentDst), m.inodeKey(parentDst))
 	if err == nil && !exchange && trash == 0 {
 		if dino > 0 && dtyp == TypeFile && tattr.Nlink == 0 {
-			m.fileDeleted(opened, dino, tattr.Length)
+			m.fileDeleted(opened, false, dino, tattr.Length)
 		}
 		m.updateStats(newSpace, newInode)
 	}
@@ -1962,7 +1961,7 @@ func (m *redisMeta) doDeleteSustainedInode(sid uint64, inode Ino) error {
 	})
 	if err == nil {
 		m.updateStats(newSpace, -1)
-		m.tryDeleteFileData(inode, attr.Length)
+		m.tryDeleteFileData(inode, attr.Length, false)
 	}
 	return err
 }
@@ -2438,8 +2437,9 @@ func (m *redisMeta) doDeleteFileData_(inode Ino, length uint64, tracking string)
 	_ = m.rdb.ZRem(ctx, m.delfiles(), tracking)
 }
 
-func (r *redisMeta) doCleanupDelayedSlices(edge int64, limit int) (int, error) {
+func (r *redisMeta) doCleanupDelayedSlices(edge int64) (int, error) {
 	ctx := Background
+	start := time.Now()
 	stop := fmt.Errorf("reach limit")
 	var count int
 	var ss []Slice
@@ -2490,9 +2490,9 @@ func (r *redisMeta) doCleanupDelayedSlices(edge int64, limit int) (int, error) {
 					count++
 				}
 			}
-			if count >= limit {
-				return stop
-			}
+		}
+		if time.Since(start) > 50*time.Minute {
+			return stop
 		}
 		return nil
 	})
@@ -2638,17 +2638,16 @@ func (m *redisMeta) compactChunk(inode Ino, indx uint32, force bool) {
 	}
 }
 
-func (m *redisMeta) CompactAll(ctx Context, bar *utils.Bar) syscall.Errno {
+func (m *redisMeta) scanAllChunks(ctx Context, ch chan<- cchunk, bar *utils.Bar) error {
 	p := m.rdb.Pipeline()
-	return errno(m.scan(ctx, "c*_*", func(keys []string) error {
-		bar.IncrTotal(int64(len(keys)))
+	return m.scan(ctx, "c*_*", func(keys []string) error {
 		for _, key := range keys {
 			_ = p.LLen(ctx, key)
 		}
 		cmds, err := p.Exec(ctx)
 		if err != nil {
 			logger.Warnf("list slices: %s", err)
-			return errno(err)
+			return err
 		}
 		for i, cmd := range cmds {
 			cnt := cmd.(*redis.IntCmd).Val()
@@ -2657,14 +2656,13 @@ func (m *redisMeta) CompactAll(ctx Context, bar *utils.Bar) syscall.Errno {
 				var indx uint32
 				n, err := fmt.Sscanf(keys[i], m.prefix+"c%d_%d", &inode, &indx)
 				if err == nil && n == 2 {
-					logger.Debugf("compact chunk %d:%d (%d slices)", inode, indx, cnt)
-					m.compactChunk(Ino(inode), indx, true)
+					bar.IncrTotal(1)
+					ch <- cchunk{Ino(inode), indx, int(cnt)}
 				}
 			}
-			bar.Increment()
 		}
 		return nil
-	}))
+	})
 }
 
 func (m *redisMeta) cleanupLeakedInodes(delete bool) {
@@ -2812,25 +2810,128 @@ func (m *redisMeta) ListSlices(ctx Context, slices map[Ino][]Slice, delete bool,
 		return errno(err)
 	}
 
-	var ss []Slice
-	err = m.hscan(ctx, m.delSlices(), func(keys []string) error {
-		for i := 0; i < len(keys); i += 2 {
-			ss = ss[:0]
-			m.decodeDelayedSlices([]byte(keys[i+1]), &ss)
-			if showProgress != nil {
-				for range ss {
-					showProgress()
-				}
+	return errno(m.scanDeletedSlices(ctx, func(ss []Slice, _ int64) (bool, error) {
+		slices[1] = append(slices[1], ss...)
+		if showProgress != nil {
+			for range ss {
+				showProgress()
 			}
-			for _, s := range ss {
-				if s.Id > 0 {
-					slices[1] = append(slices[1], s)
+		}
+		return false, nil
+	}))
+}
+
+func (m *redisMeta) scanDeletedSlices(ctx Context, scan deletedSliceScan) error {
+	if scan == nil {
+		return nil
+	}
+
+	delKeys := make(chan string, 1000)
+	c, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_ = m.hscan(c, m.delSlices(), func(keys []string) error {
+			for i := 0; i < len(keys); i += 2 {
+				delKeys <- keys[i]
+			}
+			return nil
+		})
+		close(delKeys)
+	}()
+
+	var ss []Slice
+	var rs []*redis.IntCmd
+	for key := range delKeys {
+		var clean bool
+		task := func(tx *redis.Tx) error {
+			ss = ss[:0]
+			rs = rs[:0]
+			val, err := tx.HGet(ctx, m.delSlices(), key).Result()
+			if err == redis.Nil {
+				return nil
+			} else if err != nil {
+				return err
+			}
+			ps := strings.Split(key, "_")
+			if len(ps) != 2 {
+				return fmt.Errorf("invalid key %s", key)
+			}
+			ts, err := strconv.ParseInt(ps[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid key %s, fail to parse timestamp", key)
+			}
+
+			m.decodeDelayedSlices([]byte(val), &ss)
+			clean, err = scan(ss, ts)
+			if err != nil {
+				return err
+			}
+			if clean {
+				_, err = tx.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+					for _, s := range ss {
+						rs = append(rs, pipe.HIncrBy(ctx, m.sliceRefs(), m.sliceKey(s.Id, s.Size), -1))
+					}
+					pipe.HDel(ctx, m.delSlices(), key)
+					return nil
+				})
+			}
+			return err
+		}
+		err := m.txn(ctx, task, m.delSlices())
+		if err != nil {
+			return err
+		}
+		if clean && len(rs) == len(ss) {
+			for i, s := range ss {
+				if rs[i].Err() == nil && rs[i].Val() < 0 {
+					m.deleteSlice(s.Id, s.Size)
 				}
 			}
 		}
+	}
+
+	return nil
+}
+
+func (m *redisMeta) scanDeletedFiles(ctx Context, scan deletedFileScan) error {
+	if scan == nil {
 		return nil
-	})
-	return errno(err)
+	}
+
+	visited := make(map[Ino]bool)
+	start := int64(0)
+	const batchSize = 1000
+	for {
+		pairs, err := m.rdb.ZRangeWithScores(Background, m.delfiles(), start, start+batchSize).Result()
+		if err != nil {
+			return err
+		}
+		start += batchSize
+		for _, p := range pairs {
+			v := p.Member.(string)
+			ps := strings.Split(v, ":")
+			if len(ps) != 2 { // will be cleaned up as legacy
+				continue
+			}
+			inode, _ := strconv.ParseUint(ps[0], 10, 64)
+			if visited[Ino(inode)] {
+				continue
+			}
+			visited[Ino(inode)] = true
+			size, _ := strconv.ParseUint(ps[1], 10, 64)
+			clean, err := scan(Ino(inode), size, int64(p.Score))
+			if err != nil {
+				return err
+			}
+			if clean {
+				m.doDeleteFileData_(Ino(inode), size, v)
+			}
+		}
+		if len(pairs) < batchSize {
+			break
+		}
+	}
+	return nil
 }
 
 func (m *redisMeta) doRepair(ctx Context, inode Ino, attr *Attr) syscall.Errno {
@@ -3256,7 +3357,7 @@ func (m *redisMeta) DumpMeta(w io.Writer, root Ino, keepSecret bool) (err error)
 	}
 
 	dm := &DumpedMeta{
-		Setting: m.fmt,
+		Setting: *m.fmt,
 		Counters: &DumpedCounters{
 			UsedSpace:   cs[0],
 			UsedInodes:  cs[1],

@@ -30,6 +30,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 )
 
+//mutate_test_job_number: 5
 func TestFileStat(t *testing.T) {
 	attr := meta.Attr{
 		Typ:   meta.TypeDirectory,
@@ -269,7 +270,7 @@ func createTestFS(t *testing.T) *FileSystem {
 	checkAccessFile = time.Millisecond
 	rotateAccessLog = 500
 	m := meta.NewClient("memkv://", &meta.Config{})
-	format := meta.Format{
+	format := &meta.Format{
 		Name:      "test",
 		BlockSize: 4096,
 		Capacity:  1 << 30,
@@ -292,7 +293,7 @@ func createTestFS(t *testing.T) *FileSystem {
 	store := chunk.NewCachedStore(objStore, *conf.Chunk, nil)
 	jfs, err := NewFileSystem(&conf, m, store)
 	if err != nil {
-		t.Fatalf("initialize failed: %s", err)
+		t.Fatalf("initialize  failed: %s", err)
 	}
 	return jfs
 }

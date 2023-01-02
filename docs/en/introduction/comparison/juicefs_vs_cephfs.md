@@ -1,18 +1,19 @@
 ---
 slug: /comparison/juicefs_vs_cephfs
+description: Ceph is a unified system that provides object storage, block storage and file storage. This article compares the similarities and differences between JuiceFS and Ceph.
 ---
 
 # JuiceFS vs. CephFS
 
 ## Similarities
 
-Both are highly reliable, high-performance resilient distributed file systems with good POSIX compatibility, and can be tried in a variety of file system scenarios.
+Both are highly reliable, high-performance resilient distributed file systems with good POSIX compatibility, and can be used in a variety of scenarios.
 
 ## Differences
 
 ### System Architecture
 
-Both JuiceFS and CephFS employ an architecture that separates data and metadata, but differ greatly in component implementations.
+Both JuiceFS and CephFS employ an architecture that separates data and metadata, but differ greatly in implementations.
 
 #### CephFS
 
@@ -22,7 +23,7 @@ CephFS is a complete and independent system used mainly for private cloud deploy
   - Metadata Server (MDS): stateless, and theoretically horizontally scalable. There are mature primary-secondary mechanisms, while performance and stability concerns still exist when deploying with multiple primaries; production environments typically adopt one-primary-multiple-secondary or multi-primary static isolation.
   - Persistent: independent RADOS storage pools, usually being used with SSD or higher performance hardware storage
 - Data: stored in one or more RADOS storage pools, with supports of specifying different configurations by _Layout_ such as chunk size (default 4 MiB), redundancy (multi-copy, EC), etc.
-- Client: supports kernel client (kcephfs), user state client (ceph-fuse) and libcephfs based SDKs for C++, Python, etc.; recently the community has also provided a Windows client (ceph-dokan). VFS object for Samba and FSAL module for NFS-Ganesha are also available in the ecosystem.
+- Client: supports kernel client (`kcephfs`), user state client (`ceph-fuse`) and libcephfs based SDKs for C++, Python, etc.; recently the community has also provided a Windows client (`ceph-dokan`). VFS object for Samba and FSAL module for NFS-Ganesha are also available in the ecosystem.
 
 #### JuiceFS
 
@@ -51,7 +52,7 @@ JuiceFS provides a libjfs library, a FUSE client application, Java SDK, etc. It 
 | Client data caching             | ✕                     | ✓                  |
 | Hadoop data Locality            | ✕                     | ✓                  |
 | S3-compatible                   | ✕                     | ✓                  |
-| Quota                           | Directory level quota | Volume level quota |
+| Quota                           | Directory level quota | Filesystem (Volume) level quota |
 | Languages                       | C++                   | Go                 |
 | License                         | LGPLv2.1 & LGPLv3     | Apache License 2.0             |
 
@@ -62,7 +63,7 @@ CephFS splits files by [`object_size`](https://docs.ceph.com/en/latest/cephfs/fi
 
 #### [2] Data Compression
 
-Strictly speaking, CephFS itself does not provide data compression but relies on the BlueStore compression on the RADOS layer. JuiceFS, on the other hand, has already compressed data once before uploading a Block to the object storage to reduce the capacity cost in the object storage. In other words, if you use JuiceFS to interact with RADOS, you compress a Block both before and after it enters RADOS, twice in total. Also, as mentioned in **File Chunking**, to guarantee the overwrite performance, CephFS usually does not enable the BlueStore compression.
+Strictly speaking, CephFS itself does not provide data compression but relies on the BlueStore compression on the RADOS layer. JuiceFS, on the other hand, has already compressed data once before uploading a Block to the object storage to reduce the capacity cost in the object storage. In other words, if you use JuiceFS to interact with RADOS, you compress a Block both before and after it enters RADOS, twice in total. Also, as mentioned in **File Chunking**, to guarantee overwrite performance, CephFS usually does not enable the BlueStore compression.
 
 #### [3] Data Encryption
 

@@ -15,6 +15,7 @@
  */
 
 //nolint:errcheck
+//disable_mutate_test
 package meta
 
 import (
@@ -100,6 +101,18 @@ func testTKV(t *testing.T, c tkvClient) {
 	var keys [][]byte
 	c.scan([]byte("k"), func(key, value []byte) {
 		keys = append(keys, key)
+	})
+	if len(keys) != 2 || string(keys[0]) != "k" || string(keys[1]) != "k2" {
+		t.Fatalf("keys: %+v", keys)
+	}
+	txn(func(kt kvTxn) {
+		keys = kt.scanKeysRange([]byte("a"), []byte("z"), -1, func(k []byte) bool { return len(k) == 1 })
+	})
+	if len(keys) != 2 || string(keys[0]) != "k" || string(keys[1]) != "v" {
+		t.Fatalf("keys: %+v", keys)
+	}
+	txn(func(kt kvTxn) {
+		keys = kt.scanKeysRange([]byte("k"), []byte("l"), -1, nil)
 	})
 	if len(keys) != 2 || string(keys[0]) != "k" || string(keys[1]) != "k2" {
 		t.Fatalf("keys: %+v", keys)

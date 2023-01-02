@@ -132,6 +132,34 @@ func (tx *memTxn) scanKeys(prefix_ []byte) [][]byte {
 	return keys
 }
 
+func (tx *memTxn) scanKeysRange(begin_, end_ []byte, limit int, filter func(k []byte) bool) [][]byte {
+	if limit == 0 {
+		return nil
+	}
+	tx.store.Lock()
+	defer tx.store.Unlock()
+	begin := string(begin_)
+	end := string(end_)
+	var keys [][]byte
+	tx.store.items.AscendGreaterOrEqual(&kvItem{key: begin}, func(i btree.Item) bool {
+		it := i.(*kvItem)
+		if end == "" || it.key < end {
+			if filter == nil || filter([]byte(it.key)) {
+				tx.observed[it.key] = it.ver
+				keys = append(keys, []byte(it.key))
+				if limit > 0 {
+					if limit--; limit == 0 {
+						return false
+					}
+				}
+			}
+			return true
+		}
+		return false
+	})
+	return keys
+}
+
 func (tx *memTxn) scanValues(prefix []byte, limit int, filter func(k, v []byte) bool) map[string][]byte {
 	if limit == 0 {
 		return nil
@@ -277,7 +305,9 @@ func (c *memKV) scan(prefix []byte, handler func(key []byte, value []byte)) erro
 		if end != "" && it.key >= end {
 			return false
 		}
+		c.Unlock()
 		handler([]byte(it.key), it.value)
+		c.Lock()
 		return true
 	})
 	return nil

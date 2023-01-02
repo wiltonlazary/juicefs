@@ -1,6 +1,7 @@
 ---
 sidebar_position: 1
 slug: /production_deployment_recommendations
+description: This article is intended as a reference for users who are about to deploy JuiceFS to a production environment and provides a series of environment configuration recommendations.
 ---
 
 # Production Deployment Recommendations
@@ -9,7 +10,7 @@ This article aims to give some recommendations when deploying JuiceFS to a produ
 
 ## Metrics Collection and Visualization
 
-Be sure to collect and visualize the monitoring metrics for your JuiceFS client through Grafana, as described in this [documentation](... /administration/monitoring.md).
+Be sure to collect and visualize the monitoring metrics for your JuiceFS client through Grafana, as described in this [documentation](../administration/monitoring.md).
 
 ## Automatic Metadata Backup
 

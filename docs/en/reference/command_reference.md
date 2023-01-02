@@ -1,15 +1,12 @@
 ---
-sidebar_label: Command Reference
+title: Command Reference
 sidebar_position: 1
 slug: /command_reference
+description: This article provides descriptions, usage and examples of all commands and options included in JuiceFS.
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
-
-# Command Reference
-
-There are many commands to help you manage your file system. This page provides a detailed reference for these commands.
 
 ## Overview
 
@@ -66,10 +63,6 @@ GLOBAL OPTIONS:
 COPYRIGHT:
    Apache License 2.0
 ```
-
-:::note
-If `juicefs` is not placed in your `$PATH`, you should run the script with the path to the script. For example, if `juicefs` is in current directory, you should use `./juicefs`. It is recommended to place `juicefs` in your `$PATH` for convenience. You can refer to ["Installation"](../getting-started/installation.md) for more information.
-:::
 
 :::note
 If the command option is of boolean type, such as `--debug`, there is no need to set any value, just add `--debug` to the command to enable the function; this function is disabled if `--debug` is not added.
@@ -137,9 +130,7 @@ source /etc/bash_completion.d/juicefs
 
 ## Commands
 
-### juicefs format
-
-#### Description
+### `juicefs format` {#format}
 
 Format a volume. It's the first step for initializing a new file system volume.
 
@@ -155,19 +146,19 @@ juicefs format [command options] META-URL NAME
 #### Options
 
 `--block-size value`<br />
-size of block in KiB (default: 4096)
+size of block in KiB (default: 4096). 4M is usually a better default value because many object storage services use 4M as their internal block size, thus using the same block size in JuiceFS usually yields better performance
 
 `--capacity value`<br />
-the limit for space in GiB (0 means unlimited) (default: 0)
+storage space limit in GiB, set to 0 disable limit (default: 0). Capacity will include trash files, if trash is enabled
 
 `--inodes value`<br />
 the limit for number of inodes (0 means unlimited) (default: 0)
 
 `--compress value`<br />
-compression algorithm (lz4, zstd, none) (default: "none")
+compression algorithm, choose from `lz4`, `zstd`, `none` (default: "none"). Enabling compression will inevitably affect performance, choose wisely
 
 `--shards value`<br />
-store the blocks into N buckets by hash of key (default: 0)
+store the blocks into N buckets by hash of key (default: 0), when N is greater than 0, `bucket` should to be in the form of `%d`, e.g. `--bucket "juicefs-%d"`
 
 `--storage value`<br />
 Object storage type (e.g. `s3`, `gcs`, `oss`, `cos`) (default: `"file"`, please refer to [documentation](../guide/how_to_set_up_object_storage.md#supported-object-storage) for all supported object storage types)
@@ -217,11 +208,11 @@ $ juicefs format sqlite3://myjfs.db myjfs --inode 1000000 --capacity 102400
 $ juicefs format sqlite3://myjfs.db myjfs --trash-days 0
 ```
 
-### juicefs mount
+### `juicefs mount` {#mount}
 
-#### Description
+Mount a volume. The volume must be formatted in advance.
 
-Mount a volume. The volume shoud be formatted first.
+You can use any user to execute the mount command, but please ensure that the user has write permission to the cache directory (`--cache-dir`), please read ["Cache directory"](../guide/cache_management.md#cache-dir) documentation for more information.
 
 #### Synopsis
 
@@ -229,8 +220,8 @@ Mount a volume. The volume shoud be formatted first.
 juicefs mount [command options] META-URL MOUNTPOINT
 ```
 
-- **META-URL**: Database URL for metadata storage, see "[JuiceFS supported metadata engines](../guide/how_to_set_up_metadata_engine.md)" for details.
-- **MOUNTPOINT**: file system mount point, e.g. `/mnt/jfs`, `Z:`.
+- `META-URL`: Database URL for metadata storage, see "[JuiceFS supported metadata engines](../guide/how_to_set_up_metadata_engine.md)" for details.
+- `MOUNTPOINT`: file system mount point, e.g. `/mnt/jfs`, `Z:`.
 
 #### Options
 
@@ -238,7 +229,7 @@ juicefs mount [command options] META-URL MOUNTPOINT
 address to export metrics (default: "127.0.0.1:9567")
 
 `--consul value`<br />
-consul address to register (default: "127.0.0.1:8500")
+Consul address to register (default: "127.0.0.1:8500")
 
 `--no-usage-report`<br />
 do not send usage report (default: false)
@@ -253,16 +244,16 @@ disable syslog (default: false)
 path of log file when running in background (default: `$HOME/.juicefs/juicefs.log` or `/var/log/juicefs.log`)
 
 `-o value`<br />
-other FUSE options (see [this document](../reference/fuse_mount_options.md) for more information)
+other FUSE options, see [FUSE Mount Options](../reference/fuse_mount_options.md)
 
 `--attr-cache value`<br />
-attributes cache timeout in seconds (default: 1)
+attributes cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--entry-cache value`<br />
-file entry cache timeout in seconds (default: 1)
+file entry cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--dir-entry-cache value`<br />
-dir entry cache timeout in seconds (default: 1)
+dir entry cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--enable-xattr`<br />
 enable extended attributes (xattr) (default: false)
@@ -283,7 +274,7 @@ number of retries after network failure (default: 10)
 number of connections to upload (default: 20)
 
 `--max-deletes value`<br />
-number of threads to delete objects (default: 2)
+number of threads to delete objects (default: 10)
 
 `--buffer-size value`<br />
 total read/write buffering in MiB (default: 300)
@@ -298,19 +289,19 @@ bandwidth limit for download in Mbps (default: 0)
 prefetch N blocks in parallel (default: 1)
 
 `--writeback`<br />
-upload objects in background (default: false)
+upload objects in background (default: false), see [Client write data cache](../guide/cache_management.md#writeback)
 
 `--cache-dir value`<br />
-directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `"/var/jfsCache"`)
+directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `"/var/jfsCache"`), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-size value`<br />
-size of cached object for read in MiB (default: 102400)
+size of cached object for read in MiB (default: 102400), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--free-space-ratio value`<br />
-min free space (ratio) (default: 0.1)
+min free space ratio (default: 0.1), if [Client write data cache](../guide/cache_management.md#writeback) is enabled, this option also controls write cache size, see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-partial-only`<br />
-cache random/small read only (default: false)
+cache random/small read only (default: false), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--read-only`<br />
 allow lookup/read operations only (default: false)
@@ -357,9 +348,7 @@ $ juicefs mount redis://localhost /mnt/jfs -d --read-only
 $ juicefs mount redis://localhost /mnt/jfs --backup-meta 0
 ```
 
-### juicefs umount
-
-#### Description
+### `juicefs umount`
 
 Unmount a volume.
 
@@ -377,12 +366,10 @@ force unmount a busy mount point (default: false)
 #### Examples
 
 ```bash
-$ juicefs umount /mnt/jfs
+juicefs umount /mnt/jfs
 ```
 
-### juicefs gateway
-
-#### Description
+### `juicefs gateway`
 
 Start an S3-compatible gateway.
 
@@ -413,7 +400,7 @@ number of retries after network failure (default: 10)
 number of connections to upload (default: 20)
 
 `--max-deletes value`<br />
-number of threads to delete objects (default: 2)
+number of threads to delete objects (default: 10)
 
 `--buffer-size value`<br />
 total read/write buffering in MiB (default: 300)
@@ -428,19 +415,19 @@ bandwidth limit for download in Mbps (default: 0)
 prefetch N blocks in parallel (default: 1)
 
 `--writeback`<br />
-upload objects in background (default: false)
+upload objects in background (default: false), see [Client write data cache](../guide/cache_management.md#writeback)
 
 `--cache-dir value`<br />
-directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `/var/jfsCache`)
+directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `/var/jfsCache`), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-size value`<br />
-size of cached object for read in MiB (default: 102400)
+size of cached object for read in MiB (default: 102400), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--free-space-ratio value`<br />
-min free space (ratio) (default: 0.1)
+min free space (ratio) (default: 0.1), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-partial-only`<br />
-cache random/small read only (default: false)
+cache random/small read only (default: false), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--read-only`<br />
 allow lookup/read operations only (default: false)
@@ -452,13 +439,13 @@ open file cache timeout in seconds (0 means disable this feature) (default: 0)
 mount a sub-directory as root (default: "")
 
 `--attr-cache value`<br />
-attributes cache timeout in seconds (default: 1)
+attributes cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--entry-cache value`<br />
-file entry cache timeout in seconds (default: 0)
+file entry cache timeout in seconds (default: 0), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--dir-entry-cache value`<br />
-dir entry cache timeout in seconds (default: 1)
+dir entry cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--access-log value`<br />
 path for JuiceFS access log
@@ -497,19 +484,17 @@ disable background jobs (clean-up, backup, etc.) (default: false)
 umask for new file and directory in octal (default: "022")
 
 `--consul value`<br />
-consul address to register (default: "127.0.0.1:8500")
+Consul address to register (default: "127.0.0.1:8500")
 
 #### Examples
 
 ```bash
-$ export MINIO_ROOT_USER=admin
-$ export MINIO_ROOT_PASSWORD=12345678
-$ juicefs gateway redis://localhost localhost:9000
+export MINIO_ROOT_USER=admin
+export MINIO_ROOT_PASSWORD=12345678
+juicefs gateway redis://localhost localhost:9000
 ```
 
-### juicefs webdav
-
-#### Description
+### `juicefs webdav`
 
 Start a WebDAV server.
 
@@ -540,7 +525,7 @@ number of retries after network failure (default: 10)
 number of connections to upload (default: 20)
 
 `--max-deletes value`<br />
-number of threads to delete objects (default: 2)
+number of threads to delete objects (default: 10)
 
 `--buffer-size value`<br />
 total read/write buffering in MiB (default: 300)
@@ -555,22 +540,22 @@ bandwidth limit for download in Mbps (default: 0)
 prefetch N blocks in parallel (default: 1)
 
 `--writeback`<br />
-upload objects in background (default: false)
+upload objects in background (default: false), see [Client write data cache](../guide/cache_management.md#writeback)
 
 `--upload-delay value`<br />
 delayed duration for uploading objects ("s", "m", "h") (default: 0s)
 
 `--cache-dir value`<br />
-directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `/var/jfsCache`)
+directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `/var/jfsCache`), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-size value`<br />
-size of cached object for read in MiB (default: 102400)
+size of cached object for read in MiB (default: 102400), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--free-space-ratio value`<br />
-min free space (ratio) (default: 0.1)
+min free space (ratio) (default: 0.1), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--cache-partial-only`<br />
-cache random/small read only (default: false)
+cache random/small read only (default: false), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
 `--read-only`<br />
 allow lookup/read operations only (default: false)
@@ -588,13 +573,13 @@ open file cache timeout in seconds (0 means disable this feature) (default: 0)
 mount a sub-directory as root (default: "")
 
 `--attr-cache value`<br />
-attributes cache timeout in seconds (default: 1)
+attributes cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--entry-cache value`<br />
-file entry cache timeout in seconds (default: 0)
+file entry cache timeout in seconds (default: 0), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--dir-entry-cache value`<br />
-dir entry cache timeout in seconds (default: 1)
+dir entry cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
 `--gzip`<br />
 compress served files via gzip (default: false)
@@ -609,7 +594,7 @@ path for JuiceFS access log
 address to export metrics (default: "127.0.0.1:9567")
 
 `--consul value`<br />
-consul address to register (default: "127.0.0.1:8500")
+Consul address to register (default: "127.0.0.1:8500")
 
 `--no-usage-report`<br />
 do not send usage report (default: false)
@@ -623,12 +608,10 @@ interval (in seconds) to send heartbeat; it's recommended that all clients use t
 #### Examples
 
 ```bash
-$ juicefs webdav redis://localhost localhost:9007
+juicefs webdav redis://localhost localhost:9007
 ```
 
-### juicefs sync
-
-#### Description
+### `juicefs sync`
 
 Sync between two storage.
 
@@ -695,7 +678,7 @@ don't exclude Key matching PATTERN, need to be used with `--exclude` option
 `--links, -l`<br />
 copy symlinks as symlinks (default: false)
 
-` --limit value`<br />
+`--limit value`<br />
 limit the number of objects that will be processed (default: -1)
 
 `--manager value`<br />
@@ -736,11 +719,11 @@ $ juicefs sync --include='a1/b1' --exclude='a[1-9]/b*' s3://mybucket.s3.us-east-
 $ juicefs sync --include='a1/b1' --exclude='a*' --include='b2' --exclude='b?' s3://mybucket.s3.us-east-2.amazonaws.com/ /mnt/jfs/
 ```
 
-### juicefs rmr
+### `juicefs rmr`
 
-#### Description
+Remove all the files and subdirectories, similar to rm -rf, except this command deals with metadata directly (bypassing POSIX API), thus is much faster.
 
-Remove all files in directories recursively.
+If trash is enabled, deleted files are moved into trash. read more at [Trash](../security/trash.md).
 
 #### Synopsis
 
@@ -751,12 +734,10 @@ juicefs rmr PATH ...
 #### Examples
 
 ```bash
-$ juicefs rmr /mnt/jfs/foo
+juicefs rmr /mnt/jfs/foo
 ```
 
-### juicefs info
-
-#### Description
+### `juicefs info` {#info}
 
 Show internal information for given paths or inodes.
 
@@ -780,7 +761,7 @@ show internal raw information (default: false)
 #### Examples
 
 ```bash
-$ Check a path
+# Check a path
 $ juicefs info /mnt/jfs/foo
 
 # Check an inode
@@ -788,9 +769,7 @@ $ cd /mnt/jfs
 $ juicefs info -i 100
 ```
 
-### juicefs bench
-
-#### Description
+### `juicefs bench`
 
 Run benchmark, including read/write/stat for big and small files.
 
@@ -829,9 +808,7 @@ $ juicefs bench /mnt/jfs -p 4
 $ juicefs bench /mnt/jfs --big-file-size 0
 ```
 
-### juicefs objbench
-
-#### Description
+### `juicefs objbench`
 
 Run basic benchmarks on the target object storage to test if it works as expected.
 
@@ -876,11 +853,11 @@ number of concurrent threads (default: 4)
 $ ACCESS_KEY=myAccessKey SECRET_KEY=mySecretKey juicefs objbench --storage s3  https://mybucket.s3.us-east-2.amazonaws.com -p 6
 ```
 
-### juicefs gc
+### `juicefs gc` {#gc}
 
-#### Description
+用来处理「对象泄漏」，以及因为覆盖写而产生的碎片数据的命令。详见[「状态检查 & 维护」](../administration/status_check_and_maintenance.md#gc)。
 
-Collect leaked objects.
+Deal with leaked objects, and garbage fragments produced by file overwrites. See [Status Check & Maintenance](../administration/status_check_and_maintenance.md#gc).
 
 #### Synopsis
 
@@ -912,9 +889,7 @@ $ juicefs gc redis://localhost --compact
 $ juicefs gc redis://localhost --delete
 ```
 
-### juicefs fsck
-
-#### Description
+### `juicefs fsck`
 
 Check consistency of file system.
 
@@ -927,12 +902,10 @@ juicefs fsck [command options] META-URL
 #### Examples
 
 ```bash
-$ juicefs fsck redis://localhost
+juicefs fsck redis://localhost
 ```
 
-### juicefs profile
-
-#### Description
+### `juicefs profile`
 
 Analyze [access log](../administration/fault_diagnosis_and_analysis.md#access-log).
 
@@ -956,7 +929,6 @@ only track specified PIDs(separated by comma ,)
 `--interval value`<br />
 flush interval in seconds; set it to 0 when replaying a log file to get an immediate result (default: 2)
 
-
 #### Examples
 
 ```bash
@@ -972,9 +944,7 @@ $ juicefs profile /tmp/jfs.alog
 $ juicefs profile /tmp/jfs.alog --interval 0
 ```
 
-### juicefs stats
-
-#### Description
+### `juicefs stats`
 
 Show runtime statistics.
 
@@ -987,7 +957,7 @@ juicefs stats [command options] MOUNTPOINT
 #### Options
 
 `--schema value`<br />
-schema string that controls the output sections (u: usage, f: fuse, m: meta, c: blockcache, o: object, g: go) (default: "ufmco")
+schema string that controls the output sections (u: `usage`, f: `fuse`, m: `meta`, c: `blockcache`, o: `object`, g: `go`) (default: "ufmco")
 
 `--interval value`<br />
 interval in seconds between each update (default: 1)
@@ -1004,9 +974,7 @@ $ juicefs stats /mnt/jfs
 $ juicefs stats /mnt/jfs -l 1
 ```
 
-### juicefs status
-
-#### Description
+### `juicefs status`
 
 Show status of JuiceFS.
 
@@ -1019,19 +987,19 @@ juicefs status [command options] META-URL
 #### Options
 
 `--session value, -s value`<br />
-show detailed information (sustained inodes, locks) of the specified session (sid) (default: 0)
+show detailed information (sustained inodes, locks) of the specified session (SID) (default: 0)
 
 #### Examples
 
 ```bash
-$ juicefs status redis://localhost
+juicefs status redis://localhost
 ```
 
-### juicefs warmup
+### `juicefs warmup` {#warmup}
 
-#### Description
+Download data to local cache in advance, to achieve better performance on application's first read.
 
-Build cache for target directories/files.
+You can specify a mount point path to recursively warm-up all files under this path. You can also specify a file through the `--file` option to only warm-up the files contained in it.
 
 #### Synopsis
 
@@ -1042,7 +1010,7 @@ juicefs warmup [command options] [PATH ...]
 #### Options
 
 `--file value, -f value`<br />
-file containing a list of paths
+file containing a list of paths (each line is a file path)
 
 `--threads value, -p value`<br />
 number of concurrent workers (default: 50)
@@ -1064,9 +1032,7 @@ $ cat /tmp/filelist
 $ juicefs warmup -f /tmp/filelist
 ```
 
-### juicefs dump
-
-#### Description
+### `juicefs dump`
 
 Dump metadata into a JSON file.
 
@@ -1092,9 +1058,7 @@ $ juicefs dump redis://localhost meta-dump
 $ juicefs dump redis://localhost sub-meta-dump --subdir /dir/in/jfs
 ```
 
-### juicefs load
-
-#### Description
+### `juicefs load`
 
 Load metadata from a previously dumped JSON file.
 
@@ -1109,12 +1073,10 @@ When the FILE is not provided, STDIN will be used instead.
 #### Examples
 
 ```bash
-$ juicefs load redis://localhost/1 meta-dump
+juicefs load redis://localhost/1 meta-dump
 ```
 
-### juicefs config
-
-#### Description
+### `juicefs config`
 
 Change config of a volume.
 
@@ -1175,11 +1137,9 @@ $ juicefs config redis://localhost --trash-days 7
 $ juicefs config redis://localhost --min-client-version 1.0.0 --max-client-version 1.1.0
 ```
 
-### juicefs destroy
+### `juicefs destroy`
 
-#### Description
-
-Destroy an existing volume
+Destroy an existing volume, will delete relevant data in metadata engine and object storage. See [How to destroy a file system](../administration/destroy.md).
 
 #### Synopsis
 
@@ -1195,12 +1155,10 @@ skip sanity check and force destroy the volume (default: false)
 #### Examples
 
 ```bash
-$ juicefs destroy redis://localhost e94d66a8-2339-4abd-b8d8-6812df737892
+juicefs destroy redis://localhost e94d66a8-2339-4abd-b8d8-6812df737892
 ```
 
-### juicefs debug
-
-#### Description
+### `juicefs debug`
 
 It collects and displays information from multiple dimensions such as the operating environment and system logs to help better locate errors
 

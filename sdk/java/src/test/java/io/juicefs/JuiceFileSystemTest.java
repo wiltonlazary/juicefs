@@ -33,9 +33,9 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_CHECKPOINT_INTERVAL_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_KEY;
@@ -51,6 +51,7 @@ public class JuiceFileSystemTest extends TestCase {
     cfg.addResource(JuiceFileSystemTest.class.getClassLoader().getResourceAsStream("core-site.xml"));
     cfg.set(FS_TRASH_INTERVAL_KEY, "6");
     cfg.set(FS_TRASH_CHECKPOINT_INTERVAL_KEY, "2");
+    cfg.set("juicefs.access-log", "/tmp/jfs.access.log");
     fs = FileSystem.newInstance(cfg);
     fs.delete(new Path("/hello"));
     FSDataOutputStream out = fs.create(new Path("/hello"), true);
@@ -145,6 +146,38 @@ public class JuiceFileSystemTest extends TestCase {
     FSDataInputStream in = fs.open(f);
     String str = IOUtils.toString(in);
     assertEquals("world", str);
+    in.close();
+
+    int fileLen = 1 << 20;
+    byte[] contents = new byte[fileLen];
+    Random random = new Random();
+    random.nextBytes(contents);
+    f = new Path("/tmp/writeFile");
+    FSDataOutputStream out = fs.create(f);
+    int off = 0;
+    int len = 256<<10;
+    out.write(contents, off, len);
+    out.close();
+
+    byte[] readBytes = new byte[len];
+    in = fs.open(f);
+    in.read(readBytes);
+    assertArrayEquals(Arrays.copyOfRange(contents, off, off + len), readBytes);
+    in.close();
+
+    out = fs.create(f);
+    off = 0;
+    len = fileLen;
+    for (int i = off; i < len; i++) {
+      out.write(contents[i]);
+    }
+    out.hflush();
+    readBytes = new byte[len];
+    in = fs.open(f);
+    in.read(readBytes);
+    assertArrayEquals(Arrays.copyOfRange(contents, off, off + len), readBytes);
+    out.close();
+    in.close();
   }
 
   public void testReadSkip() throws Exception {
@@ -724,5 +757,130 @@ public class JuiceFileSystemTest extends TestCase {
     newConf.set("dfs.blocksize", "256m");
     FileSystem newFs = FileSystem.newInstance(newConf);
     assertEquals(256 << 20, newFs.getDefaultBlockSize(new Path("/")));
+  }
+
+  public void testReadSpeed() throws Exception {
+    int read = (128 << 10) ;
+    Path speedFile = new Path("/tmp/speedFile");
+    fs.delete(speedFile, false);
+    FSDataOutputStream ou = fs.create(speedFile);
+    int fileSize = 128 << 20;
+    ou.write(new byte[fileSize]);
+    ou.close();
+    FSDataInputStream open = fs.open(speedFile);
+    AtomicLong counter = new AtomicLong(0L);
+    AtomicBoolean finished = new AtomicBoolean(false);
+    TimerTask timerTask = new TimerTask() {
+      @Override
+      public void run() {
+        System.out.printf("read method calls: %d\n", counter.get());
+        finished.set(true);
+      }
+    };
+    Timer timer = new Timer();
+    timer.schedule(timerTask, 1000);
+
+    ByteBuffer readArray = ByteBuffer.allocateDirect(read);
+    while (!finished.get()) {
+      open.seek(0);
+      readArray.position(0);
+      readArray.limit(read);
+      open.read(readArray);
+      counter.getAndIncrement();
+    }
+  }
+
+  private void createFileWithContents(FileSystem fs, Path f, byte[] contents) throws IOException {
+    try (FSDataOutputStream out = fs.create(f)) {
+      if (contents != null) {
+        out.write(contents);
+      }
+    }
+  }
+
+  public void testIOClosed() throws Exception {
+    Path f = new Path("/tmp/closedFile");
+    FSDataOutputStream ou = fs.create(f);
+    ou.close();
+    try {
+      ou.write(new byte[1]);
+      fail("should not work when write to a closed stream");
+    } catch (IOException ignored) {
+    }
+    FSDataInputStream in = fs.open(f);
+    in.close();
+    try {
+      in.read(new byte[1]);
+      fail("should not work when read a closed stream");
+    } catch (IOException ignored) {
+    }
+
+    ou = fs.create(f);
+    ou.close();
+    ou.close();
+  }
+
+  public void testRead() throws Exception {
+    Path f = new Path("/tmp/posFile");
+    int fileLen = 1 << 20;
+    byte[] contents = new byte[fileLen];
+    Random random = new Random();
+    random.nextBytes(contents);
+    createFileWithContents(fs, f, contents);
+    FSDataInputStream in = fs.open(f);
+
+    byte[] readBytes = new byte[fileLen];
+    int got = in.read(readBytes);
+    assertFalse(in.markSupported());
+    assertEquals(fileLen, got);
+    assertEquals(fileLen, in.getPos());
+    assertArrayEquals(Arrays.copyOfRange(contents, 0, fileLen), readBytes);
+    in.close();
+
+    in = fs.open(f);
+    int b = 0;
+    int count = 0;
+    while ((b = in.read()) != -1) {
+      assertEquals(contents[count]&0xFF, b);
+      count++;
+    }
+    assertEquals(fileLen, count);
+    in.close();
+
+    int readSize = 100;
+    in = fs.open(f);
+    got = in.read(new byte[readSize]);
+    assertEquals(readSize, got);
+    assertEquals(readSize, in.getPos());
+    assertEquals(fileLen - readSize, in.available());
+    in.close();
+
+    in = fs.open(f);
+    readBytes = new byte[128<<10];
+    int off = 100;
+    int len = 100;
+    int read = in.read(readBytes, off, len);
+    assertEquals(len, read);
+    assertArrayEquals(Arrays.copyOfRange(contents, 0, len), Arrays.copyOfRange(readBytes, off, off + len));
+    in.close();
+
+    try {
+      in = fs.open(f);
+      in.read(readBytes, off, readBytes.length - off + 1);
+      fail("IndexOutOfBoundsException");
+    } catch (IndexOutOfBoundsException ignored) {
+    } finally {
+      in.close();
+    }
+
+    in = fs.open(f);
+    in.seek(fileLen - 100);
+    long skip = in.skip(100);
+    assertEquals(100, skip);
+
+    in.seek(fileLen - 100);
+    skip = in.skip(fileLen - 100 + 1);
+    assertEquals(100, skip);
+    in.close();
   }
 }

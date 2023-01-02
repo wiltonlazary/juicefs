@@ -17,7 +17,6 @@ package io.juicefs;
 
 import com.kenai.jffi.internal.StubLoader;
 import io.juicefs.metrics.JuiceFSInstrumentation;
-import io.juicefs.utils.BufferPool;
 import io.juicefs.utils.ConsistentHash;
 import io.juicefs.utils.NodesFetcher;
 import io.juicefs.utils.NodesFetcherBuilder;
@@ -42,6 +41,7 @@ import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.DataChecksum;
+import org.apache.hadoop.util.DirectBufferPool;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.VersionInfo;
 import org.json.JSONObject;
@@ -53,6 +53,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.*;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -93,6 +94,8 @@ public class JuiceFileSystemImpl extends FileSystem {
   private ScheduledExecutorService nodesFetcherThread;
   private ScheduledExecutorService refreshUidThread;
   private Map<String, FileStatus> lastFileStatus = new HashMap<>();
+  private static final DirectBufferPool directBufferPool = new DirectBufferPool();
+
   private boolean metricsEnable = false;
 
   /*
@@ -112,7 +115,7 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     int jfs_term(long pid, long h);
 
-    int jfs_open(long pid, long h, String path, int flags);
+    int jfs_open(long pid, long h, String path, @Out ByteBuffer fileLen, int flags);
 
     int jfs_access(long pid, long h, String path, int flags);
 
@@ -321,7 +324,7 @@ public class JuiceFileSystemImpl extends FileSystem {
     obj.put("metacache", Boolean.valueOf(getConf(conf, "metacache", "true")));
     obj.put("autoCreate", Boolean.valueOf(getConf(conf, "auto-create-cache-dir", "true")));
     obj.put("maxUploads", Integer.valueOf(getConf(conf, "max-uploads", "20")));
-    obj.put("maxDeletes", Integer.valueOf(getConf(conf, "max-deletes", "2")));
+    obj.put("maxDeletes", Integer.valueOf(getConf(conf, "max-deletes", "10")));
     obj.put("uploadLimit", Integer.valueOf(getConf(conf, "upload-limit", "0")));
     obj.put("downloadLimit", Integer.valueOf(getConf(conf, "download-limit", "0")));
     obj.put("ioRetries", Integer.valueOf(getConf(conf, "io-retries", "10")));
@@ -749,13 +752,15 @@ public class JuiceFileSystemImpl extends FileSystem {
 
     private ByteBuffer buf;
     private long position;
+    private long fileLen;
 
-    public FileInputStream(Path f, int fd, int size) throws IOException {
+    public FileInputStream(Path f, int fd, int size, long fileLen) throws IOException {
       path = f;
       this.fd = fd;
-      buf = BufferPool.getBuffer(size);
+      buf = directBufferPool.getBuffer(size);
       buf.limit(0);
       position = 0;
+      this.fileLen = fileLen;
     }
 
     @Override
@@ -774,7 +779,11 @@ public class JuiceFileSystemImpl extends FileSystem {
     public synchronized int available() throws IOException {
       if (buf == null)
         throw new IOException("stream was closed");
-      return buf.remaining();
+      long remaining = fileLen - position + buf.remaining();
+      if (remaining > Integer.MAX_VALUE) {
+        return Integer.MAX_VALUE;
+      }
+      return (int)remaining;
     }
 
     @Override
@@ -783,10 +792,6 @@ public class JuiceFileSystemImpl extends FileSystem {
     }
 
     @Override
-    public void reset() throws IOException {
-      throw new IOException("Mark/reset not supported");
-    }
-
     public synchronized int read() throws IOException {
       if (buf == null)
         throw new IOException("stream was closed");
@@ -797,6 +802,7 @@ public class JuiceFileSystemImpl extends FileSystem {
       return buf.get() & 0xFF;
     }
 
+    @Override
     public synchronized int read(byte[] b, int off, int len) throws IOException {
       if (off < 0 || len < 0 || b.length - off < len)
         throw new IndexOutOfBoundsException();
@@ -835,12 +841,14 @@ public class JuiceFileSystemImpl extends FileSystem {
       if (!buf.hasRemaining() && b.remaining() <= buf.capacity() && !refill()) {
         return -1;
       }
-      int got = 0;
-      while (b.hasRemaining() && buf.hasRemaining()) {
-        b.put(buf.get());
-        got++;
+      ByteBuffer srcBuf = buf.duplicate();
+      int got = Math.min(b.remaining(), srcBuf.remaining());
+      if (got > 0) {
+        srcBuf.limit(srcBuf.position() + got);
+        b.put(srcBuf);
+        buf.position(srcBuf.position());
+        statistics.incrementBytesRead(got);
       }
-      statistics.incrementBytesRead(got);
       int more = read(position, b);
       if (more <= 0)
         return got > 0 ? got : -1;
@@ -891,13 +899,11 @@ public class JuiceFileSystemImpl extends FileSystem {
         return -1;
       if (buf == null)
         throw new IOException("stream was closed");
-      if (n < buf.remaining()) {
-        buf.position(buf.position() + (int) n);
-      } else {
-        position += n - buf.remaining();
-        buf.position(0);
-        buf.limit(0);
+      long pos = getPos();
+      if (pos + n > fileLen) {
+        n = fileLen - pos;
       }
+      seek(pos + n);
       return n;
     }
 
@@ -906,7 +912,7 @@ public class JuiceFileSystemImpl extends FileSystem {
       if (buf == null) {
         return; // already closed
       }
-      BufferPool.returnBuffer(buf);
+      directBufferPool.returnBuffer(buf);
       buf = null;
       int r = lib.jfs_close(Thread.currentThread().getId(), fd);
       fd = 0;
@@ -918,11 +924,14 @@ public class JuiceFileSystemImpl extends FileSystem {
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
     statistics.incrementReadOps(1);
-    int fd = lib.jfs_open(Thread.currentThread().getId(), handle, normalizePath(f), MODE_MASK_R);
+    ByteBuffer fileLen = ByteBuffer.allocate(8);
+    fileLen.order(ByteOrder.nativeOrder());
+    int fd = lib.jfs_open(Thread.currentThread().getId(), handle, normalizePath(f), fileLen, MODE_MASK_R);
     if (fd < 0) {
       throw error(fd, f);
     }
-    return new FSDataInputStream(new FileInputStream(f, fd, checkBufferSize(bufferSize)));
+    long len = fileLen.getLong();
+    return new FSDataInputStream(new FileInputStream(f, fd, checkBufferSize(bufferSize), len));
   }
 
   @Override
@@ -1000,6 +1009,7 @@ public class JuiceFileSystemImpl extends FileSystem {
 
   static class BufferedFSOutputStream extends BufferedOutputStream implements Syncable {
     private String hflushMethod;
+    private boolean closed;
 
     public BufferedFSOutputStream(OutputStream out) {
       super(out);
@@ -1016,7 +1026,34 @@ public class JuiceFileSystemImpl extends FileSystem {
     }
 
     @Override
-    public void hflush() throws IOException {
+    public synchronized void write(int b) throws IOException {
+      if (closed) {
+        throw new IOException("stream was closed");
+      }
+      super.write(b);
+    }
+
+    @Override
+    public synchronized void write(byte[] b, int off, int len) throws IOException {
+      if (closed) {
+        throw new IOException("stream was closed");
+      }
+      super.write(b, off, len);
+    }
+
+    @Override
+    public synchronized void flush() throws IOException {
+      if (closed) {
+        throw new IOException("stream was closed");
+      }
+      super.flush();
+    }
+
+    @Override
+    public synchronized void hflush() throws IOException {
+      if (closed) {
+        throw new IOException("stream was closed");
+      }
       flush();
       if (hflushMethod.equals("writeback")) {
         ((FSOutputStream) out).hflush();
@@ -1028,9 +1065,21 @@ public class JuiceFileSystemImpl extends FileSystem {
     }
 
     @Override
-    public void hsync() throws IOException {
+    public synchronized void hsync() throws IOException {
+      if (closed) {
+        throw new IOException("stream was closed");
+      }
       flush();
       ((FSOutputStream) out).fsync();
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+      if (closed) {
+        return;
+      }
+      super.close();
+      closed = true;
     }
 
     public OutputStream getOutputStream() {
@@ -1057,7 +1106,7 @@ public class JuiceFileSystemImpl extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize, Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
-    int fd = lib.jfs_open(Thread.currentThread().getId(), handle, normalizePath(f), MODE_MASK_W);
+    int fd = lib.jfs_open(Thread.currentThread().getId(), handle, normalizePath(f), null, MODE_MASK_W);
     if (fd < 0)
       throw error(fd, f);
     long r = lib.jfs_lseek(Thread.currentThread().getId(), fd, 0, 2);

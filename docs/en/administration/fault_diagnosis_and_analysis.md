@@ -1,25 +1,24 @@
 ---
-sidebar_label: Fault Diagnosis and Analysis
+title: Troubleshooting Methods
 sidebar_position: 5
 slug: /fault_diagnosis_and_analysis
+description: This article describes how to view and interpret logs in various operating systems for JuiceFS FUSE, CSI Driver, Hadoop Java SDK S3 gateway, S3 gateway clients.
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# Fault Diagnosis and Analysis
-
 ## Client log
 
-JuiceFS client will output logs for troubleshooting while running. The level of logs in terms of fatality follows DEBUG < INFO < WARNING < ERROR < FATAL. Since DEBUG logs are not printed by default, you need to explicitly enable it if needed, e.g. by adding the `--debug` option when running the JuiceFS client. 
+JuiceFS client will output logs for troubleshooting while running. The level of logs in terms of fatality follows DEBUG < INFO < WARNING < ERROR < FATAL. Since DEBUG logs are not printed by default, you need to explicitly enable it if needed, e.g. by adding the `--debug` option when running the JuiceFS client.
 
 Different JuiceFS clients print logs in different ways, which are described as follows.
 
 ### Mount point
 
-When a JuiceFS file system is mounted with the [`-d` option](../reference/command_reference.md#juicefs-mount) (indicating running in the background), it will print logs to the system log file and local log file simultaneously. Depending on which user is running when mounting the file system, the paths of the local log files are slightly different. For root, the local log file locates at `/var/log/juicefs.log`, while it locates at `$HOME/.juicefs/juicefs.log` for non-root users. Please refer to [`--log` option](../reference/command_reference.md#juicefs-mount) for details.
+When a JuiceFS file system is mounted with the [`-d` option](../reference/command_reference.md#mount) (indicating running in the background), it will print logs to the system log file and local log file simultaneously. Depending on which user is running when mounting the file system, the paths of the local log files are slightly different. For root, the local log file locates at `/var/log/juicefs.log`, while it locates at `$HOME/.juicefs/juicefs.log` for non-root users. Please refer to [`--log` option](../reference/command_reference.md#mount) for details.
 
-Depending on the operating system, there are different commands to retrieve system logs or read local log files directly. 
+Depending on the operating system, there are different commands to retrieve system logs or read local log files directly.
 
 <Tabs>
   <TabItem value="local-log-file" label="Local log file">
@@ -70,7 +69,7 @@ The S3 gateway can only run in the foreground, so client logs are output directl
 
 The JuiceFS client logs will be mixed into the logs of processes using JuiceFS Hadoop Java SDK, e.g. Spark executor. Thus, you need to use keywords, e.g. `juicefs` (case-insensitive), to filter out the logs you do not want.
 
-## Access log
+## Access log {#access-log}
 
 Each JuiceFS client has an access log that records all operations on the file system in detail, such as operation type, user ID, group ID, file inodes and time cost. Access logs can be used for various purposes such as performance analysis, auditing, and troubleshooting.
 
@@ -100,7 +99,7 @@ Different JuiceFS clients obtain access log in different ways, which are describ
 There is a virtual file named `.accesslog` in the root directory of the JuiceFS file system mount point, the contents of which can be viewed by the `cat` command (the command will not exit), for example (assuming the root directory of the mount point is `/jfs`):
 
 ```bash
-$ cat /jfs/.accesslog
+cat /jfs/.accesslog
 ```
 
 ```output
@@ -111,7 +110,7 @@ $ cat /jfs/.accesslog
 
 ### Kubernetes CSI Driver
 
-Please refer to [CSI Driver documentation](https://juicefs.com/docs/csi/troubleshooting) to find the mount pod or CSI driver pod depending on the version of JuiceFS CSI Driver you are using, and the `.accesslog` file can be viewed in the root directory of the JuiceFS file system mount point in the pod. The mount point path in the pod is `/jfs/<pv_volumeHandle>`. Assuming there is a mount pod named as `juicefs-1.2.3.4-pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373`, in which `pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373` is  `<pv_volumeHandle>`, you can then use the following command to view the `.accesslog` file:
+Please refer to [CSI Driver documentation](https://juicefs.com/docs/csi/troubleshooting) to find the mount pod or CSI Driver pod depending on the version of JuiceFS CSI Driver you are using, and the `.accesslog` file can be viewed in the root directory of the JuiceFS file system mount point in the pod. The mount point path in the pod is `/jfs/<pv_volumeHandle>`. Assuming there is a mount pod named as `juicefs-1.2.3.4-pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373`, in which `pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373` is  `<pv_volumeHandle>`, you can then use the following command to view the `.accesslog` file:
 
 ```bash
 kubectl -n kube-system exec juicefs-chaos-k8s-002-pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373 -- cat /jfs/pvc-d4b8fb4f-2c0b-48e8-a2dc-530799435373/.accesslog
@@ -125,7 +124,6 @@ You need to add the [`--access-log` option](../reference/command_reference.md#ju
 
 You need to add the `juicefs.access-log` configuration item in the [client configurations](../deployment/hadoop_java_sdk.md#other-configurations) of the JuiceFS Hadoop Java SDK to specify the path of the access log output, and the access log is not output by default.
 
-
 ## Runtime information
 
 By default, JuiceFS clients will listen to a TCP port locally via [pprof](https://pkg.go.dev/net/http/pprof) to get runtime information such as Goroutine stack information, CPU performance statistics, memory allocation statistics. You can see the specific port number that the current JuiceFS client is listening on by using the system command (e.g. `lsof`):
@@ -135,7 +133,7 @@ If you mount JuiceFS as the root user, you need to add `sudo` before the `lsof` 
 :::
 
 ```bash
-$ lsof -i -nP | grep LISTEN | grep juicefs
+lsof -i -nP | grep LISTEN | grep juicefs
 ```
 
 ```output
@@ -149,19 +147,22 @@ By default, pprof listens on port numbers ranging from 6060 to 6099. That's why 
 - Goroutine stack information: `http://localhost:<port>/debug/pprof/goroutine?debug=1`
 - CPU performance statistics: `http://localhost:<port>/debug/pprof/profile?seconds=30`
 - Memory allocation statistics: `http://localhost:<port>/debug/pprof/heap`
-- 
+-
+
 :::tip
 You can also use the debug command to automatically collect these runtime information and save it locally. By default, it is saved to the debug directory under the current directory, for example:
+
 ```bash
 juicefs debug /mnt/jfs
 ```
+
 For more information about the debug command, see [command reference](https://juicefs.com/docs/community/command_reference#juicefs-debug)
 :::
 
 To make it easier to analyze this runtime information, you can save it locally, e.g.:
 
 ```bash
-$ curl 'http://localhost:<port>/debug/pprof/goroutine?debug=1' > juicefs.goroutine.txt
+curl 'http://localhost:<port>/debug/pprof/goroutine?debug=1' > juicefs.goroutine.txt
 ```
 
 ```bash

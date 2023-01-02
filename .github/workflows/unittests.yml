@@ -22,7 +22,7 @@ on:
 jobs:
   unittests:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     env:
       MINIO_TEST_BUCKET: 127.0.0.1:9000/testbucket
       MINIO_ACCESS_KEY: testUser
@@ -36,24 +36,13 @@ jobs:
       TIKV_ADDR: 127.0.0.1
       REDIS_ADDR: redis://127.0.0.1:6379/13
     steps:
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: '1.18.x'
-
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
-          fetch-depth: 100
-
-      - uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
+          fetch-depth: 1
+          
+      - name: Build
+        uses: ./.github/actions/build
 
       - name: Install Packages
         run: |
@@ -62,7 +51,6 @@ jobs:
           sudo apt install -y libacl1-dev
           sudo apt install -y attr
           sudo mkdir -p /home/travis/.m2/
-
 
       - name: Download Zip
         run: |
@@ -106,9 +94,9 @@ jobs:
           docker run -d --name sftp -p 2222:22  juicedata/ci-sftp
           make
           sudo make -C fstests setup
-          chmod +x travis-setup-hdfs.sh
+          chmod +x .github/scripts/setup-hdfs.sh
           sudo lsof -i :8020 || true
-          ./travis-setup-hdfs.sh
+          ./.github/scripts/setup-hdfs.sh
           for i in {2222,3306,5432,8020,9000,9007,4500} ; do echo "lsof port:"$i;sudo lsof -i :$i;if [ $? != 0 ];then sleep 5; else continue; fi;sudo lsof -i :$i; if [ $? != 0 ];then echo "service not ready, port:"$i; exit 1;fi; done
           sudo lsof -i :2379;if [ $? != 0 ];then echo "tikv is not ready";cat output.log;exit 1; fi
 
@@ -128,7 +116,7 @@ jobs:
 
 
       - name: Code Coverage
-        uses: codecov/codecov-action@v1
+        uses: codecov/codecov-action@v3
         with:
           files: ./coverage.txt
 

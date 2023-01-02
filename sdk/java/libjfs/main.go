@@ -305,6 +305,7 @@ func push2Gateway(pushGatewayAddr, pushAuth string, pushInterVal time.Duration, 
 			pusher.BasicAuth(parts[0], parts[1])
 		}
 	}
+	pusher.Client(&http.Client{Timeout: 2 * time.Second})
 	pushers = append(pushers, pusher)
 
 	pOnce.Do(func() {
@@ -425,14 +426,10 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 		if jConf.Bucket != "" {
 			format.Bucket = jConf.Bucket
 		}
-		blob, err := cmd.NewReloadableStorage(format, func() (*meta.Format, error) {
-			format, err := m.Load(true)
-			if err == nil {
-				if jConf.Bucket != "" {
-					format.Bucket = jConf.Bucket
-				}
+		blob, err := cmd.NewReloadableStorage(format, m, func(f *meta.Format) {
+			if jConf.Bucket != "" {
+				format.Bucket = jConf.Bucket
 			}
-			return format, err
 		})
 		if err != nil {
 			logger.Errorf("object storage: %s", err)
@@ -637,7 +634,7 @@ func jfs_term(pid int, h uintptr) int {
 }
 
 //export jfs_open
-func jfs_open(pid int, h uintptr, cpath *C.char, flags int) int {
+func jfs_open(pid int, h uintptr, cpath *C.char, lenPtr uintptr, flags int) int {
 	w := F(h)
 	if w == nil {
 		return EINVAL
@@ -650,6 +647,11 @@ func jfs_open(pid int, h uintptr, cpath *C.char, flags int) int {
 	st, _ := f.Stat()
 	if st.IsDir() {
 		return ENOENT
+	}
+	if lenPtr != 0 {
+		buf := toBuf(lenPtr, 8)
+		wb := utils.NewNativeBuffer(buf)
+		wb.Put64(uint64(st.Size()))
 	}
 	return nextFileHandle(f, w)
 }

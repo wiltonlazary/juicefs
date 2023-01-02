@@ -18,15 +18,18 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -172,18 +175,15 @@ func wrapRegister(mp, name string) (prometheus.Registerer, *prometheus.Registry)
 	return registerer, registry
 }
 
-func getFormat(c *cli.Context, metaCli meta.Meta) (*meta.Format, error) {
-	format, err := metaCli.Load(true)
-	if err != nil {
-		return nil, fmt.Errorf("load setting: %s", err)
+func updateFormat(c *cli.Context) func(*meta.Format) {
+	return func(format *meta.Format) {
+		if c.IsSet("bucket") {
+			format.Bucket = c.String("bucket")
+		}
+		if c.IsSet("storage") {
+			format.Storage = c.String("storage")
+		}
 	}
-	if c.IsSet("bucket") {
-		format.Bucket = c.String("bucket")
-	}
-	if c.IsSet("storage") {
-		format.Storage = c.String("storage")
-	}
-	return format, nil
 }
 
 func daemonRun(c *cli.Context, addr string, vfsConf *vfs.Config, m meta.Meta) {
@@ -267,26 +267,87 @@ func registerMetaMsg(m meta.Meta, store chunk.ChunkStore, chunkConf *chunk.Confi
 	})
 }
 
-func prepareMp(mp string) {
+func configEqual(a, b *vfs.Config) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	ac, bc := *a, *b
+	ac.Meta, ac.Chunk, ac.Format, ac.Port, ac.AttrTimeout, ac.DirEntryTimeout, ac.EntryTimeout = nil, nil, nil, nil, 0, 0, 0
+	bc.Meta, bc.Chunk, bc.Format, bc.Port, bc.AttrTimeout, bc.DirEntryTimeout, bc.EntryTimeout = nil, nil, nil, nil, 0, 0, 0
+	eq := ac == bc
+
+	if a.Format == nil || b.Format == nil {
+		eq = eq && a.Format == b.Format
+	} else {
+		af, bf := *a.Format, *b.Format
+		af.SecretKey, bf.SecretKey = "", ""
+		eq = eq && af == bf
+	}
+
+	if a.Meta == nil || b.Meta == nil {
+		eq = eq && a.Meta == b.Meta
+	} else {
+		eq = eq && *a.Meta == *b.Meta
+	}
+
+	if a.Chunk == nil || b.Chunk == nil {
+		eq = eq && a.Chunk == b.Chunk
+	} else {
+		eq = eq && *a.Chunk == *b.Chunk
+	}
+
+	return eq
+}
+
+func prepareMp(newCfg *vfs.Config, mp string) (ignore bool) {
 	fi, err := os.Stat(mp)
-	if !strings.Contains(mp, ":") && err != nil {
+	if err != nil {
+		if strings.Contains(mp, ":") {
+			// Windows path, users should inspect mount point by themselves
+			return
+		}
 		if err := os.MkdirAll(mp, 0777); err != nil {
 			if os.IsExist(err) {
-				// a broken mount point, umount it
+				// a broken mount point, umount it and continue to mount
 				_ = doUmount(mp, true)
-			} else {
-				logger.Fatalf("create %s: %s", mp, err)
+				return
 			}
+			logger.Fatalf("create %s: %s", mp, err)
 		}
-	} else if err == nil {
-		ino, _ := utils.GetFileInode(mp)
-		if ino <= uint64(meta.RootInode) && fi.Size() == 0 {
-			// a broken mount point, umount it
-			_ = doUmount(mp, true)
-		} else if ino == uint64(meta.RootInode) {
-			logger.Warnf("%s is already mounted by juicefs, maybe you should umount it first.", mp)
-		}
+		return
 	}
+	if fi.Size() == 0 {
+		// a broken mount point, umount it and continue to mount
+		_ = doUmount(mp, true)
+		return
+	}
+
+	ino, _ := utils.GetFileInode(mp)
+	if ino != uint64(meta.RootInode) {
+		// not a mount point, just mount it
+		return
+	}
+
+	contents, err := os.ReadFile(path.Join(mp, ".config"))
+	if err != nil {
+		// failed to read juicefs config, continue to mount
+		return
+	}
+
+	originConfig := vfs.Config{}
+	if err = json.Unmarshal(contents, &originConfig); err != nil {
+		// not a valid juicefs config, continue to mount
+		return
+	}
+
+	if !configEqual(newCfg, &originConfig) {
+		// not the same juicefs, continue to mount
+		return
+	}
+
+	logger.Warnf("%s is already mounted by the same juicefs, ignored", mp)
+	return true
 }
 
 func getMetaConf(c *cli.Context, mp string, readOnly bool) *meta.Config {
@@ -312,6 +373,11 @@ func getMetaConf(c *cli.Context, mp string, readOnly bool) *meta.Config {
 }
 
 func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
+	cm, err := strconv.ParseUint(c.String("cache-mode"), 8, 32)
+	if err != nil {
+		logger.Warnf("Invalid cache-mode %s, using default value 0600", c.String("cache-mode"))
+		cm = 0600
+	}
 	chunkConf := &chunk.Config{
 		BlockSize:  format.BlockSize * 1024,
 		Compress:   format.Compression,
@@ -332,7 +398,7 @@ func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
 		CacheDir:          c.String("cache-dir"),
 		CacheSize:         int64(c.Int("cache-size")),
 		FreeSpace:         float32(c.Float64("free-space-ratio")),
-		CacheMode:         os.FileMode(0600),
+		CacheMode:         os.FileMode(cm),
 		CacheFullBlock:    !c.Bool("cache-partial-only"),
 		CacheChecksum:     c.String("verify-cache-checksum"),
 		CacheScanInterval: duration(c.String("cache-scan-interval")),
@@ -359,35 +425,38 @@ func initBackgroundTasks(c *cli.Context, vfsConf *vfs.Config, metaConf *meta.Con
 
 type storageHolder struct {
 	object.ObjectStorage
+	fmt meta.Format
 }
 
-func NewReloadableStorage(format *meta.Format, reload func() (*meta.Format, error)) (object.ObjectStorage, error) {
+func NewReloadableStorage(format *meta.Format, cli meta.Meta, patch func(*meta.Format)) (object.ObjectStorage, error) {
+	if patch != nil {
+		patch(format)
+	}
 	blob, err := createStorage(*format)
 	if err != nil {
 		return nil, err
 	}
-	holder := &storageHolder{blob}
-	go func() {
-		old := *format // keep a copy, so it will not refreshed
-		for {
-			time.Sleep(time.Minute)
-			new, err := reload()
-			if err != nil {
-				logger.Warnf("reload config: %s", err)
-				continue
-			}
-			if new.Storage != old.Storage || new.Bucket != old.Bucket || new.AccessKey != old.AccessKey || new.SecretKey != old.SecretKey || new.SessionToken != old.SessionToken {
-				logger.Infof("found new configuration: storage=%s bucket=%s ak=%s", new.Storage, new.Bucket, new.AccessKey)
-				newBlob, err := createStorage(*new)
-				if err != nil {
-					logger.Warnf("object storage: %s", err)
-					continue
-				}
-				holder.ObjectStorage = newBlob
-				old = *new
-			}
+	holder := &storageHolder{
+		ObjectStorage: blob,
+		fmt:           *format, // keep a copy to find the change
+	}
+	cli.OnReload(func(new *meta.Format) {
+		if patch != nil {
+			patch(new)
 		}
-	}()
+		old := &holder.fmt
+		if new.Storage != old.Storage || new.Bucket != old.Bucket || new.AccessKey != old.AccessKey || new.SecretKey != old.SecretKey || new.SessionToken != old.SessionToken {
+			logger.Infof("found new configuration: storage=%s bucket=%s ak=%s", new.Storage, new.Bucket, new.AccessKey)
+
+			newBlob, err := createStorage(*new)
+			if err != nil {
+				logger.Warnf("object storage: %s", err)
+				return
+			}
+			holder.ObjectStorage = newBlob
+			holder.fmt = *new
+		}
+	})
 	return holder, nil
 }
 
@@ -418,7 +487,7 @@ func tryToInstallMountExec() error {
 	if _, err := os.Stat("/sbin/mount.juicefs"); err == nil {
 		return nil
 	}
-	src, err := filepath.Abs(os.Args[0])
+	src, err := os.Executable()
 	if err != nil {
 		return err
 	}
@@ -500,21 +569,21 @@ func mount(c *cli.Context) error {
 	addr := c.Args().Get(0)
 	mp := c.Args().Get(1)
 
-	prepareMp(mp)
 	metaConf := getMetaConf(c, mp, c.Bool("read-only") || utils.StringContains(strings.Split(c.String("o"), ","), "ro"))
 	metaConf.CaseInsensi = strings.HasSuffix(mp, ":") && runtime.GOOS == "windows"
 	metaCli := meta.NewClient(addr, metaConf)
-	format, err := getFormat(c, metaCli)
+	format, err := metaCli.Load(true)
 	if err != nil {
 		return err
+	}
+	if st := metaCli.Chroot(meta.Background, metaConf.Subdir); st != 0 {
+		return st
 	}
 
 	// Wrap the default registry, all prometheus.MustRegister() calls should be afterwards
 	registerer, registry := wrapRegister(mp, format.Name)
 
-	blob, err := NewReloadableStorage(format, func() (*meta.Format, error) {
-		return getFormat(c, metaCli)
-	})
+	blob, err := NewReloadableStorage(format, metaCli, updateFormat(c))
 	if err != nil {
 		return fmt.Errorf("object storage: %s", err)
 	}
@@ -538,10 +607,17 @@ func mount(c *cli.Context) error {
 	registerMetaMsg(metaCli, store, chunkConf)
 
 	vfsConf := getVfsConf(c, metaConf, format, chunkConf)
+	ignore := prepareMp(vfsConf, mp)
+	if !c.Bool("force") && ignore {
+		return nil
+	}
 
 	if c.Bool("background") && os.Getenv("JFS_FOREGROUND") == "" {
 		daemonRun(c, addr, vfsConf, metaCli)
 	} else {
+		if c.IsSet("log") {
+			logger.Warnf("--log flag is ignored in foreground mode, the log output will be Stderr")
+		}
 		go checkMountpoint(vfsConf.Format.Name, mp, c.String("log"), false)
 	}
 
@@ -555,5 +631,7 @@ func mount(c *cli.Context) error {
 	v := vfs.NewVFS(vfsConf, metaCli, store, registerer, registry)
 	initBackgroundTasks(c, vfsConf, metaConf, metaCli, blob, registerer, registry)
 	mount_main(v, c)
-	return metaCli.CloseSession()
+	err = metaCli.CloseSession()
+	logger.Infof("The juicefs mount process exit successfully, mountpoint: %s", metaConf.MountPoint)
+	return err
 }

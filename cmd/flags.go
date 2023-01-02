@@ -106,7 +106,7 @@ func clientFlags() []cli.Flag {
 		},
 		&cli.IntFlag{
 			Name:  "max-deletes",
-			Value: 2,
+			Value: 10,
 			Usage: "number of threads to delete objects",
 		},
 		&cli.IntFlag{
@@ -143,6 +143,11 @@ func clientFlags() []cli.Flag {
 			Name:  "cache-dir",
 			Value: defaultCacheDir,
 			Usage: "directory paths of local cache, use colon to separate multiple paths",
+		},
+		&cli.StringFlag{
+			Name:  "cache-mode",
+			Value: "0600", // only owner can read/write cache
+			Usage: "file permissions for cached blocks",
 		},
 		&cli.IntFlag{
 			Name:  "cache-size",

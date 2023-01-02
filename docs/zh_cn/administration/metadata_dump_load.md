@@ -1,11 +1,11 @@
 ---
-sidebar_label: 元数据备份和恢复
+title: 元数据备份和恢复
 sidebar_position: 2
 slug: /metadata_dump_load
 ---
-# 元数据备份和恢复
 
 :::tip 提示
+
 - JuiceFS v0.15.2 开始支持元数据手动备份、恢复和引擎间迁移。
 - JuiceFS v1.0.0 开始支持元数据自动备份
 :::
@@ -65,6 +65,7 @@ juicefs load redis://192.168.1.6:6379/1 meta.dump
 ```bash
 juicefs dump redis://192.168.1.6:6379/1 meta.dump
 ```
+
 ```bash
 juicefs load mysql://user:password@(192.168.1.6:3306)/juicefs meta.dump
 ```
@@ -98,6 +99,10 @@ juicefs dump redis://192.168.1.6:6379/1 meta.dump --subdir /path/in/juicefs
 从 JuiceFS v1.0.0 开始，不论文件系统通过 `mount` 命令挂载，还是通过 JuiceFS S3 网关及 Hadoop Java SDK 访问，客户端每小时都会自动备份元数据并拷贝到对象存储。
 
 备份的文件存储在对象存储的 `meta` 目录中，它是一个独立于数据存储的目录，在挂载点中不可见，也不会与数据存储之间产生影响，用对象存储的文件浏览器即可查看和管理。
+
+:::tip 提示
+自动备份采用 Gzip 压缩，备份的文件以 `.gz` 结尾，使用时需要先用 `gzip -d` 命令解压。
+:::
 
 ![](../images/meta-auto-backup-list.png)
 
