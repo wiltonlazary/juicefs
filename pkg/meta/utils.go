@@ -29,8 +29,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/juicedata/juicefs/pkg/utils"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -47,6 +48,12 @@ const (
 	fallocCollapesRange = 0x08
 	fallocZeroRange     = 0x10
 	fallocInsertRange   = 0x20
+)
+const (
+	// clone mode
+	CLONE_MODE_CAN_OVERWRITE      = 0x01
+	CLONE_MODE_PRESERVE_ATTR      = 0x02
+	CLONE_MODE_PRESERVE_HARDLINKS = 0x08
 )
 
 type msgCallbacks struct {
@@ -238,7 +245,7 @@ func updateLocks(ls []plockRecord, nl plockRecord) []plockRecord {
 	return ls
 }
 
-func (m *baseMeta) emptyDir(ctx Context, inode Ino, count *uint64, concurrent chan int) syscall.Errno {
+func (m *baseMeta) emptyDir(ctx Context, inode Ino, skipCheckTrash bool, count *uint64, concurrent chan int) syscall.Errno {
 	if st := m.Access(ctx, inode, 3, nil); st != 0 {
 		return st
 	}
@@ -267,14 +274,14 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, count *uint64, concurrent ch
 					wg.Add(1)
 					go func(child Ino, name string) {
 						defer wg.Done()
-						e := m.emptyEntry(ctx, inode, name, child, count, concurrent)
+						e := m.emptyEntry(ctx, inode, name, child, skipCheckTrash, count, concurrent)
 						if e != 0 && e != syscall.ENOENT {
 							status = e
 						}
 						<-concurrent
 					}(e.Inode, string(e.Name))
 				default:
-					if st := m.emptyEntry(ctx, inode, string(e.Name), e.Inode, count, concurrent); st != 0 && st != syscall.ENOENT {
+					if st := m.emptyEntry(ctx, inode, string(e.Name), e.Inode, skipCheckTrash, count, concurrent); st != 0 && st != syscall.ENOENT {
 						return st
 					}
 				}
@@ -282,7 +289,7 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, count *uint64, concurrent ch
 				if count != nil {
 					atomic.AddUint64(count, 1)
 				}
-				if st := m.Unlink(ctx, inode, string(e.Name)); st != 0 && st != syscall.ENOENT {
+				if st := m.Unlink(ctx, inode, string(e.Name), skipCheckTrash); st != 0 && st != syscall.ENOENT {
 					return st
 				}
 			}
@@ -292,18 +299,18 @@ func (m *baseMeta) emptyDir(ctx Context, inode Ino, count *uint64, concurrent ch
 			entries[i] = nil // release memory
 		}
 		wg.Wait()
-		if status != 0 {
+		if status != 0 || inode == TrashInode { // try only once for .trash
 			return status
 		}
 	}
 }
 
-func (m *baseMeta) emptyEntry(ctx Context, parent Ino, name string, inode Ino, count *uint64, concurrent chan int) syscall.Errno {
-	st := m.emptyDir(ctx, inode, count, concurrent)
-	if st == 0 {
-		st = m.Rmdir(ctx, parent, name)
+func (m *baseMeta) emptyEntry(ctx Context, parent Ino, name string, inode Ino, skipCheckTrash bool, count *uint64, concurrent chan int) syscall.Errno {
+	st := m.emptyDir(ctx, inode, skipCheckTrash, count, concurrent)
+	if st == 0 && !isTrash(inode) {
+		st = m.Rmdir(ctx, parent, name, skipCheckTrash)
 		if st == syscall.ENOTEMPTY {
-			st = m.emptyEntry(ctx, parent, name, inode, count, concurrent)
+			st = m.emptyEntry(ctx, parent, name, inode, skipCheckTrash, count, concurrent)
 		} else if count != nil {
 			atomic.AddUint64(count, 1)
 		}
@@ -328,7 +335,7 @@ func (m *baseMeta) Remove(ctx Context, parent Ino, name string, count *uint64) s
 		return m.Unlink(ctx, parent, name)
 	}
 	concurrent := make(chan int, 50)
-	return m.emptyEntry(ctx, parent, name, inode, count, concurrent)
+	return m.emptyEntry(ctx, parent, name, inode, false, count, concurrent)
 }
 
 func GetSummary(r Meta, ctx Context, inode Ino, summary *Summary, recursive bool) syscall.Errno {
@@ -336,36 +343,135 @@ func GetSummary(r Meta, ctx Context, inode Ino, summary *Summary, recursive bool
 	if st := r.GetAttr(ctx, inode, &attr); st != 0 {
 		return st
 	}
-	if attr.Typ == TypeDirectory {
-		var entries []*Entry
-		if st := r.Readdir(ctx, inode, 1, &entries); st != 0 {
-			return st
+	if attr.Typ != TypeDirectory {
+		summary.Files++
+		summary.Size += uint64(align4K(attr.Length))
+		if attr.Typ == TypeFile {
+			summary.Length += attr.Length
 		}
-		for _, e := range entries {
-			if e.Inode == inode || len(e.Name) == 2 && bytes.Equal(e.Name, []byte("..")) {
-				continue
-			}
-			if e.Attr.Typ == TypeDirectory {
-				if recursive {
-					if st := GetSummary(r, ctx, e.Inode, summary, recursive); st != 0 {
-						return st
+		return 0
+	}
+	summary.Dirs++
+	summary.Size += uint64(align4K(0))
+
+	const concurrency = 50
+	dirs := []Ino{inode}
+	for len(dirs) > 0 {
+		entriesList := make([][]*Entry, len(dirs))
+		var eg errgroup.Group
+		eg.SetLimit(concurrency)
+		for i := range dirs {
+			ino := dirs[i]
+			entries := &entriesList[i]
+			eg.Go(func() error {
+				st := r.Readdir(ctx, ino, 1, entries)
+				if st != 0 && st != syscall.ENOENT {
+					return st
+				}
+				return nil
+			})
+		}
+		if err := eg.Wait(); err != nil {
+			return err.(syscall.Errno)
+		}
+		dirs = dirs[:0]
+		for _, entries := range entriesList {
+			for _, e := range entries {
+				if bytes.Equal(e.Name, []byte(".")) || bytes.Equal(e.Name, []byte("..")) {
+					continue
+				}
+				if e.Attr.Typ == TypeDirectory {
+					summary.Dirs++
+					summary.Size += uint64(align4K(0))
+					if recursive {
+						dirs = append(dirs, e.Inode)
 					}
 				} else {
-					summary.Dirs++
-					summary.Size += 4096
+					summary.Files++
+					summary.Size += uint64(align4K(e.Attr.Length))
+					if e.Attr.Typ == TypeFile {
+						summary.Length += e.Attr.Length
+					}
 				}
-			} else {
-				summary.Files++
-				summary.Length += e.Attr.Length
-				summary.Size += uint64(align4K(e.Attr.Length))
 			}
 		}
-		summary.Dirs++
-		summary.Size += 4096
-	} else {
+	}
+	return 0
+}
+
+func FastGetSummary(r Meta, ctx Context, inode Ino, summary *Summary, recursive bool) syscall.Errno {
+	var attr Attr
+	if st := r.GetAttr(ctx, inode, &attr); st != 0 {
+		return st
+	}
+	if attr.Typ != TypeDirectory {
 		summary.Files++
-		summary.Length += attr.Length
 		summary.Size += uint64(align4K(attr.Length))
+		if attr.Typ == TypeFile {
+			summary.Length += attr.Length
+		}
+		return 0
+	}
+	summary.Dirs++
+
+	const concurrency = 50
+	dirs := []Ino{inode}
+	for len(dirs) > 0 {
+		entriesList := make([][]*Entry, len(dirs))
+		dirStats := make([]dirStat, len(dirs))
+		var eg errgroup.Group
+		eg.SetLimit(concurrency)
+		for i := range dirs {
+			ino := dirs[i]
+			entries := &entriesList[i]
+			stat := &dirStats[i]
+			eg.Go(func() error {
+				s, err := r.GetDirStat(ctx, ino)
+				if err != nil {
+					return err
+				}
+				*stat = *s
+				var attr Attr
+				if st := r.GetAttr(ctx, ino, &attr); st != 0 && st != syscall.ENOENT {
+					return st
+				}
+				if attr.Nlink == 2 {
+					// leaf dir, no need to read entries
+					return nil
+				}
+				if st := r.Readdir(ctx, ino, 0, entries); st != 0 && st != syscall.ENOENT {
+					return st
+				}
+				return nil
+			})
+		}
+		if err := eg.Wait(); err != nil {
+			return errno(err)
+		}
+		dirs = dirs[:0]
+		for i, entries := range entriesList {
+			stat := dirStats[i]
+			summary.Size += uint64(stat.space)
+			summary.Length += uint64(stat.length)
+			if entries == nil {
+				// leaf dir
+				summary.Files += uint64(stat.inodes)
+				continue
+			}
+			for _, e := range entries {
+				if bytes.Equal(e.Name, []byte(".")) || bytes.Equal(e.Name, []byte("..")) {
+					continue
+				}
+				if e.Attr.Typ == TypeDirectory {
+					summary.Dirs++
+					if recursive {
+						dirs = append(dirs, e.Inode)
+					}
+				} else {
+					summary.Files++
+				}
+			}
+		}
 	}
 	return 0
 }

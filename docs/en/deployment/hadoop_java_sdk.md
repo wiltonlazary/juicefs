@@ -7,7 +7,7 @@ slug: /hadoop_java_sdk
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-JuiceFS provides [Hadoop-compatible FileSystem](https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/filesystem/introduction.html) by Hadoop Java SDK. Various applications in the Hadoop ecosystem can smoothly use JuiceFS to store data without changing the code.
+JuiceFS provides [Hadoop-compatible File System](https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/filesystem/introduction.html) by Hadoop Java SDK. Various applications in the Hadoop ecosystem can smoothly use JuiceFS to store data without changing the code.
 
 ## Requirements
 
@@ -64,16 +64,18 @@ git clone https://github.com/juicedata/juicefs.git
 
 Enter the directory and compile:
 
+```shell
+cd juicefs/sdk/java
+make
+```
+
 :::note
-If Ceph RADOS is used to store data, you need to install `librados-dev` first and [build `libjfs.so`](https://github.com/juicedata/juicefs/blob/main/sdk/java/libjfs/Makefile#L38-L39) with `-tags ceph`.
+If Ceph RADOS is used to store data, you need to install `librados-dev` first and [build `libjfs.so`]`.
 :::
 
 ```shell
 cd juicefs/sdk/java
-```
-
-```shell
-make
+make ceph
 ```
 
 After the compilation, you can find the compiled `JAR` file in the `sdk/java/target` directory, including two versions:
@@ -126,11 +128,12 @@ It is recommended to place the JAR file in a fixed location, and the other locat
 
 ### Community Components
 
-| Name   | Installing Paths                     |
-|--------|--------------------------------------|
-| Spark  | `${SPARK_HOME}/jars`                 |
-| Presto | `${PRESTO_HOME}/plugin/hive-hadoop2` |
-| Flink  | `${FLINK_HOME}/lib`                  |
+| Name      | Installing Paths                                                          |
+|-----------|---------------------------------------------------------------------------|
+| Spark     | `${SPARK_HOME}/jars`                                                      |
+| Presto    | `${PRESTO_HOME}/plugin/hive-hadoop2`                                      |
+| Flink     | `${FLINK_HOME}/lib`                                                       |
+| StarRocks | `${StarRocks_HOME}/fe/lib/`, `${StarRocks_HOME}/be/lib/hadoop/common/lib` |
 
 ### Client Configurations
 
@@ -140,8 +143,8 @@ Please refer to the following table to set the relevant parameters of the JuiceF
 
 | Configuration                    | Default Value                | Description                                                                                                                                                                                                                                                                                  |
 |----------------------------------|------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `fs.jfs.impl`                    | `io.juicefs.JuiceFileSystem` | Specify the storage implementation to be used. By default, `jfs://` scheme is used. If you want to use different scheme (e.g. `cfs://`), just modify it to `fs.cfs.impl`. No matter what sheme you use, it is always access the data in JuiceFS.                                             |
-| `fs.AbstractFileSystem.jfs.impl` | `io.juicefs.JuiceFS`         | Specify the storage implementation to be used. By default, `jfs://` scheme is used. If you want to use different scheme (e.g. `cfs://`), just modify it to `fs.AbstractFileSystem.cfs.impl`. No matter what sheme you use, it is always access the data in JuiceFS.                          |
+| `fs.jfs.impl`                    | `io.juicefs.JuiceFileSystem` | Specify the storage implementation to be used. By default, `jfs://` scheme is used. If you want to use different scheme (e.g. `cfs://`), just modify it to `fs.cfs.impl`. No matter what scheme you use, it is always access the data in JuiceFS.                                             |
+| `fs.AbstractFileSystem.jfs.impl` | `io.juicefs.JuiceFS`         | Specify the storage implementation to be used. By default, `jfs://` scheme is used. If you want to use different scheme (e.g. `cfs://`), just modify it to `fs.AbstractFileSystem.cfs.impl`. No matter what scheme you use, it is always access the data in JuiceFS.                          |
 | `juicefs.meta`                   |                              | Specify the metadata engine address of the pre-created JuiceFS file system. You can configure multiple file systems for the client at the same time through the format of `juicefs.{vol_name}.meta`. Refer to ["Multiple file systems configuration"](#multiple-file-systems-configuration). |
 
 #### Cache Configurations
@@ -181,6 +184,7 @@ Please refer to the following table to set the relevant parameters of the JuiceF
 | `juicefs.debug`           | `false`       | Whether enable debug log                                                                                                                                                    |
 | `juicefs.access-log`      |               | Access log path. Ensure Hadoop application has write permission, e.g. `/tmp/juicefs.access.log`. The log file will rotate  automatically to keep at most 7 files.           |
 | `juicefs.superuser`       | `hdfs`        | The super user                                                                                                                                                              |
+| `juicefs.supergroup`      | `supergroup`  | The super user group                                                                                                                                                        |
 | `juicefs.users`           | `null`        | The path of username and UID list file, e.g. `jfs://name/etc/users`. The file format is `<username>:<UID>`, one user per line.                                              |
 | `juicefs.groups`          | `null`        | The path of group name, GID and group members list file, e.g. `jfs://name/etc/groups`. The file format is `<group-name>:<GID>:<username1>,<username2>`, one group per line. |
 | `juicefs.umask`           | `null`        | The umask used when creating files and directories (e.g. `0022`), default value is `fs.permissions.umask-mode`.                                                             |
@@ -420,9 +424,7 @@ CREATE TABLE IF NOT EXISTS person
 
 2. Use the following sample code to verify:
 
-   <Tabs>
-     <TabItem value="java" label="Java">
-
+<!-- autocorrect: false -->
    ```java
    package demo;
 
@@ -446,9 +448,7 @@ CREATE TABLE IF NOT EXISTS person
        }
    }
    ```
-
-     </TabItem>
-   </Tabs>
+<!-- autocorrect: true -->
 
 ## Monitoring metrics collection
 

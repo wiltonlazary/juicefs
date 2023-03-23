@@ -35,14 +35,14 @@ func WithPrefix(os ObjectStorage, prefix string) ObjectStorage {
 
 func (s *withPrefix) Symlink(oldName, newName string) error {
 	if w, ok := s.os.(SupportSymlink); ok {
-		return w.Symlink(oldName, newName)
+		return w.Symlink(oldName, s.prefix+newName)
 	}
 	return notSupported
 }
 
 func (s *withPrefix) Readlink(name string) (string, error) {
 	if w, ok := s.os.(SupportSymlink); ok {
-		return w.Readlink(name)
+		return w.Readlink(s.prefix + name)
 	}
 	return "", notSupported
 }
@@ -51,8 +51,45 @@ func (p *withPrefix) String() string {
 	return fmt.Sprintf("%s%s", p.os, p.prefix)
 }
 
+func (p *withPrefix) Limits() Limits {
+	return p.os.Limits()
+}
+
 func (p *withPrefix) Create() error {
 	return p.os.Create()
+}
+
+type withFile struct {
+	File
+	key string
+}
+
+func (f *withFile) Key() string { return f.key }
+
+type withObj struct {
+	Object
+	key string
+}
+
+func (o *withObj) Key() string { return o.key }
+
+func (p *withPrefix) updateKey(o Object) Object {
+	key := o.Key()
+	if len(key) < len(p.prefix) {
+		return o
+	}
+	key = key[len(p.prefix):]
+	switch po := o.(type) {
+	case *obj:
+		po.key = key
+	case *file:
+		po.key = key
+	case File:
+		o = &withFile{po, key}
+	case Object:
+		o = &withObj{po, key}
+	}
+	return o
 }
 
 func (p *withPrefix) Head(key string) (Object, error) {
@@ -60,16 +97,13 @@ func (p *withPrefix) Head(key string) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch po := o.(type) {
-	case *obj:
-		po.key = po.key[len(p.prefix):]
-	case *file:
-		po.key = po.key[len(p.prefix):]
-	}
-	return o, nil
+	return p.updateKey(o), nil
 }
 
 func (p *withPrefix) Get(key string, off, limit int64) (io.ReadCloser, error) {
+	if off > 0 && limit < 0 {
+		return nil, fmt.Errorf("invalid range: %d-%d", off, limit)
+	}
 	return p.os.Get(p.prefix+key, off, limit)
 }
 
@@ -86,14 +120,8 @@ func (p *withPrefix) List(prefix, marker, delimiter string, limit int64) ([]Obje
 		marker = p.prefix + marker
 	}
 	objs, err := p.os.List(p.prefix+prefix, marker, delimiter, limit)
-	ln := len(p.prefix)
-	for _, o := range objs {
-		switch p := o.(type) {
-		case *obj:
-			p.key = p.key[ln:]
-		case *file:
-			p.key = p.key[ln:]
-		}
+	for i, o := range objs {
+		objs[i] = p.updateKey(o)
 	}
 	return objs, err
 }
@@ -107,16 +135,10 @@ func (p *withPrefix) ListAll(prefix, marker string) (<-chan Object, error) {
 		return r, err
 	}
 	r2 := make(chan Object, 10240)
-	ln := len(p.prefix)
 	go func() {
 		for o := range r {
 			if o != nil && o.Key() != "" {
-				switch p := o.(type) {
-				case *obj:
-					p.key = p.key[ln:]
-				case *file:
-					p.key = p.key[ln:]
-				}
+				o = p.updateKey(o)
 			}
 			r2 <- o
 		}
@@ -152,6 +174,10 @@ func (p *withPrefix) CreateMultipartUpload(key string) (*MultipartUpload, error)
 
 func (p *withPrefix) UploadPart(key string, uploadID string, num int, body []byte) (*Part, error) {
 	return p.os.UploadPart(p.prefix+key, uploadID, num, body)
+}
+
+func (s *withPrefix) UploadPartCopy(key string, uploadID string, num int, srcKey string, off, size int64) (*Part, error) {
+	return s.os.UploadPartCopy(s.prefix+key, uploadID, num, s.prefix+srcKey, off, size)
 }
 
 func (p *withPrefix) AbortUpload(key string, uploadID string) {

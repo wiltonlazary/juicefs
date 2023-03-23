@@ -23,13 +23,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/IBM/ibm-cos-sdk-go/aws"
 	"github.com/IBM/ibm-cos-sdk-go/aws/awserr"
@@ -56,6 +57,13 @@ func (s *ibmcos) Create() error {
 	return err
 }
 
+func (s *ibmcos) Limits() Limits {
+	return Limits{
+		IsSupportMultipartUpload: true,
+		IsSupportUploadPartCopy:  false,
+	}
+}
+
 func (s *ibmcos) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	params := &s3.GetObjectInput{Bucket: &s.bucket, Key: &key}
 	if off > 0 || limit > 0 {
@@ -79,7 +87,7 @@ func (s *ibmcos) Put(key string, in io.Reader) error {
 	if b, ok := in.(io.ReadSeeker); ok {
 		body = b
 	} else {
-		data, err := ioutil.ReadAll(in)
+		data, err := io.ReadAll(in)
 		if err != nil {
 			return err
 		}
@@ -138,11 +146,14 @@ func (s *ibmcos) Delete(key string) error {
 
 func (s *ibmcos) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	param := s3.ListObjectsInput{
-		Bucket:    &s.bucket,
-		Prefix:    &prefix,
-		Marker:    &marker,
-		MaxKeys:   &limit,
-		Delimiter: &delimiter,
+		Bucket:       &s.bucket,
+		Prefix:       &prefix,
+		Marker:       &marker,
+		MaxKeys:      &limit,
+		EncodingType: aws.String("url"),
+	}
+	if delimiter != "" {
+		param.Delimiter = &delimiter
 	}
 	resp, err := s.s3.ListObjects(&param)
 	if err != nil {
@@ -152,11 +163,19 @@ func (s *ibmcos) List(prefix, marker, delimiter string, limit int64) ([]Object, 
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
-		objs[i] = &obj{*o.Key, *o.Size, *o.LastModified, strings.HasSuffix(*o.Key, "/")}
+		oKey, err := url.QueryUnescape(*o.Key)
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to decode key %s", *o.Key)
+		}
+		objs[i] = &obj{oKey, *o.Size, *o.LastModified, strings.HasSuffix(oKey, "/")}
 	}
 	if delimiter != "" {
 		for _, p := range resp.CommonPrefixes {
-			objs = append(objs, &obj{*p.Prefix, 0, time.Unix(0, 0), true})
+			prefix, err := url.QueryUnescape(*p.Prefix)
+			if err != nil {
+				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", *p.Prefix)
+			}
+			objs = append(objs, &obj{prefix, 0, time.Unix(0, 0), true})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
@@ -193,6 +212,10 @@ func (s *ibmcos) UploadPart(key string, uploadID string, num int, body []byte) (
 		return nil, err
 	}
 	return &Part{Num: num, ETag: *resp.ETag}, nil
+}
+
+func (s *ibmcos) UploadPartCopy(key string, uploadID string, num int, srcKey string, off, size int64) (*Part, error) {
+	return nil, notSupported
 }
 
 func (s *ibmcos) AbortUpload(key string, uploadID string) {

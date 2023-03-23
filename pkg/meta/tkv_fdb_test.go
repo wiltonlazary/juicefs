@@ -24,15 +24,15 @@ import (
 	"testing"
 )
 
-func TestFdbClient(t *testing.T) {
-	m, err := newKVMeta("fdb", "/etc/foundationdb/fdb.cluster?prefix=test2", &Config{})
+func TestFdbClient(t *testing.T) { //skip mutate
+	m, err := newKVMeta("fdb", "/etc/foundationdb/fdb.cluster?prefix=test2", DefaultConf())
 	if err != nil {
 		t.Fatalf("create meta: %s", err)
 	}
 	testMeta(t, m)
 }
 
-func TestFdb(t *testing.T) {
+func TestFdb(t *testing.T) { //skip mutate
 	c, err := newFdbClient("/etc/foundationdb/fdb.cluster?prefix=test1")
 	if err != nil {
 		t.Fatal(err)

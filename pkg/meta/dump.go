@@ -18,12 +18,12 @@ package meta
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/goccy/go-json"
 	"github.com/juicedata/juicefs/pkg/utils"
 )
 
@@ -315,7 +315,7 @@ func loadEntries(r io.Reader, load func(*DumpedEntry), addChunk func(*chunkKey))
 		return
 	}
 
-	progress := utils.NewProgress(false, false)
+	progress := utils.NewProgress(false)
 	bar := progress.AddCountBar("Loaded entries", 1) // with root
 	dm = &DumpedMeta{}
 	counters = &DumpedCounters{ // rebuild counters
@@ -444,8 +444,9 @@ func decodeEntry(dec *json.Decoder, parent Ino, cs *DumpedCounters, parents map[
 					}
 					e.Entries[n.(string)] = &DumpedEntry{
 						Attr: &DumpedAttr{
-							Inode: child.Attr.Inode,
-							Type:  child.Attr.Type,
+							Inode:  child.Attr.Inode,
+							Type:   child.Attr.Type,
+							Length: child.Attr.Length,
 						},
 					}
 				}

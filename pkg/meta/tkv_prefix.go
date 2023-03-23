@@ -19,7 +19,7 @@ package meta
 import "fmt"
 
 type prefixTxn struct {
-	kvTxn
+	*kvTxn
 	prefix []byte
 }
 
@@ -39,54 +39,17 @@ func (tx *prefixTxn) get(key []byte) []byte {
 }
 
 func (tx *prefixTxn) gets(keys ...[]byte) [][]byte {
+	realKeys := make([][]byte, len(keys))
 	for i, key := range keys {
-		keys[i] = tx.realKey(key)
+		realKeys[i] = tx.realKey(key)
 	}
-	return tx.kvTxn.gets(keys...)
+	return tx.kvTxn.gets(realKeys...)
 }
 
-func (tx *prefixTxn) scanRange(begin_, end_ []byte) map[string][]byte {
-	r := tx.kvTxn.scanRange(tx.realKey(begin_), tx.realKey(end_))
-	m := make(map[string][]byte, len(r))
-	for k, v := range r {
-		m[k[len(tx.prefix):]] = v
-	}
-	return m
-}
-
-func (tx *prefixTxn) scanKeys(prefix []byte) [][]byte {
-	keys := tx.kvTxn.scanKeys(tx.realKey(prefix))
-	for i, k := range keys {
-		keys[i] = tx.origKey(k)
-	}
-	return keys
-}
-
-func (tx *prefixTxn) scanKeysRange(begin, end []byte, limit int, filter func(k []byte) bool) [][]byte {
-	keys := tx.kvTxn.scanKeysRange(tx.realKey(begin), tx.realKey(end), limit, func(k []byte) bool {
-		if filter == nil {
-			return true
-		}
-		return filter(tx.origKey(k))
+func (tx *prefixTxn) scan(begin, end []byte, keysOnly bool, handler func(k, v []byte) bool) {
+	tx.kvTxn.scan(tx.realKey(begin), tx.realKey(end), keysOnly, func(k, v []byte) bool {
+		return handler(tx.origKey(k), v)
 	})
-	for i, k := range keys {
-		keys[i] = tx.origKey(k)
-	}
-	return keys
-}
-
-func (tx *prefixTxn) scanValues(prefix []byte, limit int, filter func(k, v []byte) bool) map[string][]byte {
-	r := tx.kvTxn.scanValues(tx.realKey(prefix), limit, func(k, v []byte) bool {
-		if filter == nil {
-			return true
-		}
-		return filter(tx.origKey(k), v)
-	})
-	m := make(map[string][]byte, len(r))
-	for k, v := range r {
-		m[k[len(tx.prefix):]] = v
-	}
-	return m
 }
 
 func (tx *prefixTxn) exist(prefix []byte) bool {
@@ -105,11 +68,8 @@ func (tx *prefixTxn) incrBy(key []byte, value int64) int64 {
 	return tx.kvTxn.incrBy(tx.realKey(key), value)
 }
 
-func (tx *prefixTxn) dels(keys ...[]byte) {
-	for i, key := range keys {
-		keys[i] = tx.realKey(key)
-	}
-	tx.kvTxn.dels(keys...)
+func (tx *prefixTxn) delete(key []byte) {
+	tx.kvTxn.delete(tx.realKey(key))
 }
 
 type prefixClient struct {
@@ -117,10 +77,10 @@ type prefixClient struct {
 	prefix []byte
 }
 
-func (c *prefixClient) txn(f func(kvTxn) error) error {
-	return c.tkvClient.txn(func(tx kvTxn) error {
-		return f(&prefixTxn{tx, c.prefix})
-	})
+func (c *prefixClient) txn(f func(*kvTxn) error, retry int) error {
+	return c.tkvClient.txn(func(tx *kvTxn) error {
+		return f(&kvTxn{&prefixTxn{tx, c.prefix}, retry})
+	}, retry)
 }
 
 func (c *prefixClient) scan(prefix []byte, handler func(key, value []byte)) error {

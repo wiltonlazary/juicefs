@@ -30,10 +30,10 @@ import (
 	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
-	"github.com/go-redis/redis/v8"
 	"github.com/juicedata/juicefs/pkg/meta"
 	"github.com/juicedata/juicefs/pkg/utils"
 	"github.com/juicedata/juicefs/pkg/vfs"
+	"github.com/redis/go-redis/v9"
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/urfave/cli/v2"
 )
@@ -47,7 +47,7 @@ func Test_exposeMetrics(t *testing.T) {
 	Convey("Test_exposeMetrics", t, func() {
 		Convey("Test_exposeMetrics", func() {
 			addr := "redis://127.0.0.1:6379/12"
-			client := meta.NewClient(addr, &meta.Config{})
+			client := meta.NewClient(addr, nil)
 			format := &meta.Format{
 				Name:      "test",
 				BlockSize: 4096,
@@ -210,16 +210,7 @@ func Test_configEqual(t *testing.T) {
 			a: &vfs.Config{}, b: &vfs.Config{}, equal: true,
 		},
 		{
-			a: &vfs.Config{Format: &meta.Format{}}, b: &vfs.Config{}, equal: false,
-		},
-		{
-			a: &vfs.Config{}, b: &vfs.Config{Format: &meta.Format{}}, equal: false,
-		},
-		{
-			a: &vfs.Config{Format: &meta.Format{}}, b: &vfs.Config{Format: &meta.Format{}}, equal: true,
-		},
-		{
-			a: &vfs.Config{Format: &meta.Format{SecretKey: "1"}}, b: &vfs.Config{Format: &meta.Format{SecretKey: "2"}}, equal: true,
+			a: &vfs.Config{Format: meta.Format{SecretKey: "1"}}, b: &vfs.Config{Format: meta.Format{SecretKey: "2"}}, equal: true,
 		},
 		{
 			a: &vfs.Config{Port: &vfs.Port{}}, b: &vfs.Config{}, equal: true,

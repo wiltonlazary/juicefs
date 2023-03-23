@@ -45,10 +45,11 @@ func testKeysEqual(objs []Object, expectedKeys []string) error {
 
 func TestDisk2(t *testing.T) {
 	s, _ := newDisk("/tmp/abc/", "", "", "")
+	s = WithPrefix(s, "prefix/")
 	testFileSystem(t, s)
 }
 
-func TestSftp2(t *testing.T) {
+func TestSftp2(t *testing.T) { //skip mutate
 	if os.Getenv("SFTP_HOST") == "" {
 		t.SkipNow()
 	}
@@ -56,7 +57,7 @@ func TestSftp2(t *testing.T) {
 	testFileSystem(t, sftp)
 }
 
-func TestHDFS2(t *testing.T) {
+func TestHDFS2(t *testing.T) { //skip mutate
 	if os.Getenv("HDFS_ADDR") == "" {
 		t.Skip()
 	}

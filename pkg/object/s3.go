@@ -23,7 +23,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +30,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -61,6 +62,16 @@ type s3client struct {
 
 func (s *s3client) String() string {
 	return fmt.Sprintf("s3://%s/", s.bucket)
+}
+
+func (s *s3client) Limits() Limits {
+	return Limits{
+		IsSupportMultipartUpload: true,
+		IsSupportUploadPartCopy:  true,
+		MinPartSize:              5 << 20,
+		MaxPartSize:              5 << 30,
+		MaxPartCount:             10000,
+	}
 }
 
 func isExists(err error) bool {
@@ -128,7 +139,7 @@ func (s *s3client) Put(key string, in io.Reader) error {
 	if b, ok := in.(io.ReadSeeker); ok {
 		body = b
 	} else {
-		data, err := ioutil.ReadAll(in)
+		data, err := io.ReadAll(in)
 		if err != nil {
 			return err
 		}
@@ -164,7 +175,7 @@ func (s *s3client) Delete(key string) error {
 		Key:    &key,
 	}
 	_, err := s.s3.DeleteObject(&param)
-	if err != nil && strings.Contains(err.Error(), "NoSuckKey") {
+	if err != nil && strings.Contains(err.Error(), "NoSuchKey") {
 		err = nil
 	}
 	return err
@@ -172,11 +183,14 @@ func (s *s3client) Delete(key string) error {
 
 func (s *s3client) List(prefix, marker, delimiter string, limit int64) ([]Object, error) {
 	param := s3.ListObjectsInput{
-		Bucket:    &s.bucket,
-		Prefix:    &prefix,
-		Marker:    &marker,
-		MaxKeys:   &limit,
-		Delimiter: &delimiter,
+		Bucket:       &s.bucket,
+		Prefix:       &prefix,
+		Marker:       &marker,
+		MaxKeys:      &limit,
+		EncodingType: aws.String("url"),
+	}
+	if delimiter != "" {
+		param.Delimiter = &delimiter
 	}
 	resp, err := s.s3.ListObjects(&param)
 	if err != nil {
@@ -186,19 +200,27 @@ func (s *s3client) List(prefix, marker, delimiter string, limit int64) ([]Object
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
-		if !strings.HasPrefix(*o.Key, prefix) || *o.Key < marker {
-			return nil, fmt.Errorf("found invalid key %s from List, prefix: %s, marker: %s", *o.Key, prefix, marker)
+		oKey, err := url.QueryUnescape(*o.Key)
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to decode key %s", *o.Key)
+		}
+		if !strings.HasPrefix(oKey, prefix) || oKey < marker {
+			return nil, fmt.Errorf("found invalid key %s from List, prefix: %s, marker: %s", oKey, prefix, marker)
 		}
 		objs[i] = &obj{
-			*o.Key,
+			oKey,
 			*o.Size,
 			*o.LastModified,
-			strings.HasSuffix(*o.Key, "/"),
+			strings.HasSuffix(oKey, "/"),
 		}
 	}
 	if delimiter != "" {
 		for _, p := range resp.CommonPrefixes {
-			objs = append(objs, &obj{*p.Prefix, 0, time.Unix(0, 0), true})
+			prefix, err := url.QueryUnescape(*p.Prefix)
+			if err != nil {
+				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", *p.Prefix)
+			}
+			objs = append(objs, &obj{prefix, 0, time.Unix(0, 0), true})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
@@ -235,6 +257,21 @@ func (s *s3client) UploadPart(key string, uploadID string, num int, body []byte)
 		return nil, err
 	}
 	return &Part{Num: num, ETag: *resp.ETag}, nil
+}
+
+func (s *s3client) UploadPartCopy(key string, uploadID string, num int, srcKey string, off, size int64) (*Part, error) {
+	resp, err := s.s3.UploadPartCopy(&s3.UploadPartCopyInput{
+		Bucket:          aws.String(s.bucket),
+		CopySource:      aws.String(s.bucket + "/" + srcKey),
+		CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", off, off+size-1)),
+		Key:             aws.String(key),
+		PartNumber:      aws.Int64(int64(num)),
+		UploadId:        aws.String(uploadID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Part{Num: num, ETag: *resp.CopyPartResult.ETag}, nil
 }
 
 func (s *s3client) AbortUpload(key string, uploadID string) {
@@ -449,6 +486,12 @@ func newS3(endpoint, accessKey, secretKey, token string) (ObjectStorage, error) 
 		DisableSSL: aws.Bool(!ssl),
 		HTTPClient: httpClient,
 	}
+
+	disable100Continue := strings.EqualFold(uri.Query().Get("disable-100-continue"), "true")
+	if disable100Continue {
+		awsConfig.S3Disable100Continue = aws.Bool(true)
+	}
+
 	if accessKey == "anonymous" {
 		awsConfig.Credentials = credentials.AnonymousCredentials
 	} else if accessKey != "" {

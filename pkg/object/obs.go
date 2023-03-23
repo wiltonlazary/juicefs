@@ -25,13 +25,14 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-obs/obs"
 	"github.com/juicedata/juicefs/pkg/utils"
@@ -49,6 +50,16 @@ type obsClient struct {
 
 func (s *obsClient) String() string {
 	return fmt.Sprintf("obs://%s/", s.bucket)
+}
+
+func (s *obsClient) Limits() Limits {
+	return Limits{
+		IsSupportMultipartUpload: true,
+		IsSupportUploadPartCopy:  true,
+		MinPartSize:              100 << 10,
+		MaxPartSize:              5 << 30,
+		MaxPartCount:             10000,
+	}
 }
 
 func (s *obsClient) Create() error {
@@ -87,12 +98,19 @@ func (s *obsClient) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	params := &obs.GetObjectInput{}
 	params.Bucket = s.bucket
 	params.Key = key
-	params.RangeStart = off
-	if limit > 0 {
-		params.RangeEnd = off + limit - 1
+	var resp *obs.GetObjectOutput
+	var err error
+	rangeStr := getRange(off, limit)
+	if rangeStr != "" {
+		resp, err = s.c.GetObject(params, obs.WithHeader(obs.HEADER_RANGE, []string{rangeStr}))
+	} else {
+		resp, err = s.c.GetObject(params)
 	}
-	resp, err := s.c.GetObject(params)
 	if err != nil {
+		return nil, err
+	}
+	if err = checkGetStatus(resp.StatusCode, rangeStr != ""); err != nil {
+		_ = resp.Body.Close()
 		return nil, err
 	}
 	return resp.Body, nil
@@ -118,7 +136,7 @@ func (s *obsClient) Put(key string, in io.Reader) error {
 		sum = h.Sum(nil)
 		body = b
 	} else {
-		data, err := ioutil.ReadAll(in)
+		data, err := io.ReadAll(in)
 		if err != nil {
 			return err
 		}
@@ -168,6 +186,7 @@ func (s *obsClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 	input.Prefix = prefix
 	input.MaxKeys = int(limit)
 	input.Delimiter = delimiter
+	input.EncodingType = "url"
 	resp, err := s.c.ListObjects(input)
 	if err != nil {
 		return nil, err
@@ -176,11 +195,19 @@ func (s *obsClient) List(prefix, marker, delimiter string, limit int64) ([]Objec
 	objs := make([]Object, n)
 	for i := 0; i < n; i++ {
 		o := resp.Contents[i]
-		objs[i] = &obj{o.Key, o.Size, o.LastModified, strings.HasSuffix(o.Key, "/")}
+		key, err := obs.UrlDecode(o.Key)
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to decode key %s", o.Key)
+		}
+		objs[i] = &obj{key, o.Size, o.LastModified, strings.HasSuffix(key, "/")}
 	}
 	if delimiter != "" {
 		for _, p := range resp.CommonPrefixes {
-			objs = append(objs, &obj{p, 0, time.Unix(0, 0), true})
+			prefix, err := obs.UrlDecode(p)
+			if err != nil {
+				return nil, errors.WithMessagef(err, "failed to decode commonPrefixes %s", p)
+			}
+			objs = append(objs, &obj{prefix, 0, time.Unix(0, 0), true})
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].Key() < objs[j].Key() })
 	}
@@ -216,6 +243,23 @@ func (s *obsClient) UploadPart(key string, uploadID string, num int, body []byte
 	if err == nil && s.checkEtag && strings.Trim(resp.ETag, "\"") != obs.Hex(sum[:]) {
 		err = fmt.Errorf("unexpected ETag: %s != %s", strings.Trim(resp.ETag, "\""), obs.Hex(sum[:]))
 	}
+	if err != nil {
+		return nil, err
+	}
+	return &Part{Num: num, ETag: resp.ETag}, err
+}
+
+func (s *obsClient) UploadPartCopy(key string, uploadID string, num int, srcKey string, off, size int64) (*Part, error) {
+	resp, err := s.c.CopyPart(&obs.CopyPartInput{
+		Bucket:               s.bucket,
+		Key:                  key,
+		UploadId:             uploadID,
+		PartNumber:           num,
+		CopySourceBucket:     s.bucket,
+		CopySourceKey:        srcKey,
+		CopySourceRangeStart: off,
+		CopySourceRangeEnd:   off + size - 1,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +386,7 @@ func newOBS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 	}
 	var checkEtag bool
 	if _, err = c.GetBucketEncryption(bucketName); err != nil {
-		if obsError, ok := err.(*obs.ObsError); ok && obsError.Code == "NoSuchEncryptionConfiguration" {
+		if obsError, ok := err.(obs.ObsError); ok && obsError.Code == "NoSuchEncryptionConfiguration" {
 			checkEtag = true
 		} else if !ok || obsError.Code != "NoSuchBucket" {
 			logger.Warnf("get bucket encryption: %q", err)

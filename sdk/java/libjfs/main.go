@@ -249,6 +249,7 @@ type javaConf struct {
 	DownloadLimit     int     `json:"downloadLimit"`
 	MaxUploads        int     `json:"maxUploads"`
 	MaxDeletes        int     `json:"maxDeletes"`
+	SkipDirNlink      int     `json:"skipDirNlink"`
 	IORetries         int     `json:"ioRetries"`
 	GetTimeout        int     `json:"getTimeout"`
 	PutTimeout        int     `json:"putTimeout"`
@@ -381,14 +382,14 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			utils.SetLogLevel(logrus.WarnLevel)
 		}
 
-		metaConf := &meta.Config{
-			Retries:   jConf.IORetries,
-			Strict:    true,
-			ReadOnly:  jConf.ReadOnly,
-			NoBGJob:   jConf.NoBGJob,
-			OpenCache: time.Duration(jConf.OpenCache * 1e9),
-			Heartbeat: time.Second * time.Duration(jConf.Heartbeat),
-		}
+		metaConf := meta.DefaultConf()
+		metaConf.Retries = jConf.IORetries
+		metaConf.MaxDeletes = jConf.MaxDeletes
+		metaConf.SkipDirNlink = jConf.SkipDirNlink
+		metaConf.ReadOnly = jConf.ReadOnly
+		metaConf.NoBGJob = jConf.NoBGJob
+		metaConf.OpenCache = time.Duration(jConf.OpenCache * 1e9)
+		metaConf.Heartbeat = time.Second * time.Duration(jConf.Heartbeat)
 		m := meta.NewClient(jConf.MetaURL, metaConf)
 		format, err := m.Load(true)
 		if err != nil {
@@ -453,7 +454,6 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 			CacheChecksum:     jConf.CacheChecksum,
 			CacheScanInterval: time.Second * time.Duration(jConf.CacheScanInterval),
 			MaxUpload:         jConf.MaxUploads,
-			MaxDeletes:        jConf.MaxDeletes,
 			MaxRetries:        jConf.IORetries,
 			UploadLimit:       int64(jConf.UploadLimit) * 1e6 / 8,
 			DownloadLimit:     int64(jConf.DownloadLimit) * 1e6 / 8,
@@ -485,7 +485,7 @@ func jfs_init(cname, jsonConf, user, group, superuser, supergroup *C.char) uintp
 
 		conf := &vfs.Config{
 			Meta:            metaConf,
-			Format:          format,
+			Format:          *format,
 			Chunk:           &chunkConf,
 			AttrTimeout:     time.Millisecond * time.Duration(jConf.AttrTimeout*1000),
 			EntryTimeout:    time.Millisecond * time.Duration(jConf.EntryTimeout*1000),
@@ -854,7 +854,7 @@ func jfs_lstat1(pid int, h uintptr, cpath *C.char, buf uintptr) int {
 	if w == nil {
 		return EINVAL
 	}
-	fi, err := w.Stat(w.withPid(pid), C.GoString(cpath))
+	fi, err := w.Lstat(w.withPid(pid), C.GoString(cpath))
 	if err != 0 {
 		return errno(err)
 	}

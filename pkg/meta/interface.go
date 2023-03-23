@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/juicedata/juicefs/pkg/utils"
-	"github.com/juicedata/juicefs/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -48,6 +47,8 @@ const (
 	FillCache = 1004
 	// InfoV2 is a message to get the internal info for file or directory.
 	InfoV2 = 1005
+	// Clone is a message to clone a file or dir from another.
+	Clone = 1006
 )
 
 const (
@@ -270,7 +271,7 @@ type Meta interface {
 	// ListSessions returns all client sessions.
 	ListSessions() ([]*Session, error)
 	// ScanDeletedObject scan deleted objects by customized scanner.
-	ScanDeletedObject(Context, deletedSliceScan, deletedFileScan) error
+	ScanDeletedObject(Context, trashSliceScan, pendingSliceScan, trashFileScan, pendingFileScan) error
 	// ListLocks returns all locks of a inode.
 	ListLocks(ctx context.Context, inode Ino) ([]PLockItem, []FLockItem, error)
 	// CleanStaleSessions cleans up sessions not active for more than 5 minutes
@@ -306,9 +307,9 @@ type Meta interface {
 	Mkdir(ctx Context, parent Ino, name string, mode uint16, cumask uint16, copysgid uint8, inode *Ino, attr *Attr) syscall.Errno
 	// Unlink removes a file entry from a directory.
 	// The file will be deleted if it's not linked by any entries and not open by any sessions.
-	Unlink(ctx Context, parent Ino, name string) syscall.Errno
+	Unlink(ctx Context, parent Ino, name string, skipCheckTrash ...bool) syscall.Errno
 	// Rmdir removes an empty sub-directory.
-	Rmdir(ctx Context, parent Ino, name string) syscall.Errno
+	Rmdir(ctx Context, parent Ino, name string, skipCheckTrash ...bool) syscall.Errno
 	// Rename move an entry from a source directory to another with given name.
 	// The targeted entry will be overwrited if it's a file or empty directory.
 	// For Hadoop, the target should not be overwritten.
@@ -335,6 +336,8 @@ type Meta interface {
 	CopyFileRange(ctx Context, fin Ino, offIn uint64, fout Ino, offOut uint64, size uint64, flags uint32, copied *uint64) syscall.Errno
 	// GetParents returns a map of node parents (> 1 parents if hardlinked)
 	GetParents(ctx Context, inode Ino) map[Ino]int
+	// GetDirStat returns the space and inodes usage of a directory.
+	GetDirStat(ctx Context, inode Ino) (st *dirStat, err error)
 
 	// GetXattr returns the value of extended attribute for given name.
 	GetXattr(ctx Context, inode Ino, name string, vbuff *[]byte) syscall.Errno
@@ -357,12 +360,16 @@ type Meta interface {
 	ListSlices(ctx Context, slices map[Ino][]Slice, delete bool, showProgress func()) syscall.Errno
 	// Remove all files and directories recursively.
 	Remove(ctx Context, parent Ino, name string, count *uint64) syscall.Errno
+	//Clone a file or directory
+	Clone(ctx Context, srcIno, dstParentIno Ino, dstName string, cmode uint8, cumask uint16, count, total *uint64) syscall.Errno
 	// GetPaths returns all paths of an inode
 	GetPaths(ctx Context, inode Ino) []string
 	// Check integrity of an absolute path and repair it if asked
-	Check(ctx Context, fpath string, repair bool, recursive bool) syscall.Errno
+	Check(ctx Context, fpath string, repair bool, recursive bool, statAll bool) syscall.Errno
 	// Change root to a directory specified by subdir
 	Chroot(ctx Context, subdir string) syscall.Errno
+	// Get a copy of the current format
+	GetFormat() Format
 
 	// OnMsg add a callback for the given message type.
 	OnMsg(mtype uint32, cb MsgCallback)
@@ -426,18 +433,14 @@ func NewClient(uri string, conf *Config) Meta {
 	if !ok {
 		logger.Fatalf("Invalid meta driver: %s", driver)
 	}
+	if conf == nil {
+		conf = DefaultConf()
+	} else {
+		conf.SelfCheck()
+	}
 	m, err := f(driver, uri[p+3:], conf)
 	if err != nil {
 		logger.Fatalf("Meta %s is not available: %s", utils.RemovePassword(uri), err)
 	}
 	return m
-}
-
-func newSessionInfo() *SessionInfo {
-	host, err := os.Hostname()
-	if err != nil {
-		logger.Warnf("Failed to get hostname: %s", err)
-		host = ""
-	}
-	return &SessionInfo{Version: version.Version(), HostName: host, ProcessID: os.Getpid()}
 }

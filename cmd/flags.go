@@ -110,6 +110,10 @@ func clientFlags() []cli.Flag {
 			Usage: "number of threads to delete objects",
 		},
 		&cli.IntFlag{
+			Name:  "skip-dir-nlink",
+			Usage: "number of retries after which the update of directory nlink will be skipped (used for tkv only, 0 means never)",
+		},
+		&cli.IntFlag{
 			Name:  "buffer-size",
 			Value: 300,
 			Usage: "total read/write buffering in MB",
@@ -194,7 +198,12 @@ func clientFlags() []cli.Flag {
 		&cli.Float64Flag{
 			Name:  "open-cache",
 			Value: 0.0,
-			Usage: "open files cache timeout in seconds (0 means disable this feature)",
+			Usage: "The seconds to reuse open file without checking update (0 means disable this feature)",
+		},
+		&cli.Uint64Flag{
+			Name:  "open-cache-limit",
+			Value: 10000,
+			Usage: "max number of open files to cache (soft limit, 0 means unlimited)",
 		},
 		&cli.StringFlag{
 			Name:  "subdir",

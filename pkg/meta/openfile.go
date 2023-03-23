@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+const (
+	invalidateAllChunks = 0xFFFFFFFF
+	invalidateAttrOnly  = 0xFFFFFFFE
+)
+
 type openFile struct {
 	sync.RWMutex
 	attr      Attr
@@ -16,12 +21,14 @@ type openFile struct {
 type openfiles struct {
 	sync.Mutex
 	expire time.Duration
+	limit  uint64
 	files  map[Ino]*openFile
 }
 
-func newOpenFiles(expire time.Duration) *openfiles {
+func newOpenFiles(expire time.Duration, limit uint64) *openfiles {
 	of := &openfiles{
 		expire: expire,
+		limit:  limit,
 		files:  make(map[Ino]*openFile),
 	}
 	go of.cleanup()
@@ -30,21 +37,44 @@ func newOpenFiles(expire time.Duration) *openfiles {
 
 func (o *openfiles) cleanup() {
 	for {
+		var (
+			cnt, deleted, todel int
+			candidateIno        Ino
+			candidateOf         *openFile
+		)
 		o.Lock()
-		cutoff := time.Now().Add(-time.Hour).Add(time.Second * time.Duration(len(o.files)/1e4))
-		var cnt, expired int
+		if o.limit > 0 && len(o.files) > int(o.limit) {
+			todel = len(o.files) - int(o.limit)
+		}
 		for ino, of := range o.files {
-			if of.refs <= 0 && of.lastCheck.Before(cutoff) {
-				delete(o.files, ino)
-				expired++
-			}
 			cnt++
-			if cnt > 1e3 {
+			if cnt > 1e3 || todel > 0 && deleted >= todel {
 				break
+			}
+			if of.refs <= 0 {
+				if time.Since(of.lastCheck) > time.Hour*12 {
+					delete(o.files, ino)
+					deleted++
+					continue
+				}
+				if todel == 0 {
+					continue
+				}
+				if candidateIno == 0 {
+					candidateIno = ino
+					candidateOf = of
+					continue
+				}
+				if of.lastCheck.Before(candidateOf.lastCheck) {
+					candidateIno = ino
+				}
+				delete(o.files, candidateIno)
+				deleted++
+				candidateIno = 0
 			}
 		}
 		o.Unlock()
-		time.Sleep(time.Millisecond * time.Duration(1000*(cnt+1-expired*2)/(cnt+1)))
+		time.Sleep(time.Millisecond * time.Duration(1000*(cnt+1-deleted*2)/(cnt+1)))
 	}
 }
 
@@ -161,7 +191,7 @@ func (o *openfiles) InvalidateChunk(ino Ino, indx uint32) {
 	defer o.Unlock()
 	of, ok := o.files[ino]
 	if ok {
-		if indx == 0xFFFFFFFF {
+		if indx == invalidateAllChunks {
 			of.chunks = make(map[uint32][]Slice)
 		} else {
 			delete(of.chunks, indx)

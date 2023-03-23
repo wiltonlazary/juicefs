@@ -93,7 +93,7 @@ JuiceFS also provides flexible support for this object storage service that dist
 
 Creating a file system using an internal Endpoint ensures better performance and lower latency, and for clients that cannot be accessed through an internal address, you can specify a public Endpoint to mount with the option `--bucket`.
 
-## Storage Class
+## Storage Class {#storage-class}
 
 Object storage usually supports multiple storage classes, such as standard storage, infrequent access storage, and archive storage. When creating an object storage bucket you can choose an appropriate storage class according to your actual needs, or automatically convert the storage class of existing objects through lifecycle management. Storage classes that support real-time access to data (e.g. standard storage and infrequent access storage) can be used as the underlying JuiceFS data store, while those that require thawing for access in advance (e.g. archive storage) cannot.
 
@@ -246,7 +246,7 @@ Once you have configured the environment variables for passing key information, 
 ```bash
 juicefs format \
     --storage gs \
-    --bucket <bucket> \
+    --bucket <bucket>[.region] \
     ... \
     myjfs
 ```
@@ -414,7 +414,7 @@ juicefs format \
 ```
 
 :::caution
-Storj DCS [ListObjects](https://github.com/storj/gateway-st/blob/main/docs/s3-compatibility.md#listobjects) API is not fully S3 compatible (result list is not sorted), so some features of JuiceFS do not work. For example, `juicefs gc`, `juicefs fsck`, `juicefs sync`, `juicefs destroy`. And when using `juicefs mount`, you need to disable [automatic-backup](../administration/metadata_dump_load.md#automatic-backup) function by adding `--backup-meta 0`.
+Storj DCS [ListObjects](https://github.com/storj/gateway-st/blob/main/docs/s3-compatibility.md#listobjects) API is not fully S3 compatible (result list is not sorted), so some features of JuiceFS do not work. For example, `juicefs gc`, `juicefs fsck`, `juicefs sync`, `juicefs destroy`. And when using `juicefs mount`, you need to disable [automatic-backup](../administration/metadata_dump_load.md#backup-automatically) function by adding `--backup-meta 0`.
 :::
 
 ## Vultr Object Storage
@@ -460,7 +460,7 @@ juicefs format \
 ```
 
 :::caution
-Cloudflare R2 `ListObjects` API is not fully S3 compatible (result list is not sorted), so some features of JuiceFS do not work. For example, `juicefs gc`, `juicefs fsck`, `juicefs sync`, `juicefs destroy`. And when using `juicefs mount`, you need to disable [automatic-backup](../administration/metadata_dump_load.md#automatic-backup) function by adding `--backup-meta 0`.
+Cloudflare R2 `ListObjects` API is not fully S3 compatible (result list is not sorted), so some features of JuiceFS do not work. For example, `juicefs gc`, `juicefs fsck`, `juicefs sync`, `juicefs destroy`. And when using `juicefs mount`, you need to disable [automatic-backup](../administration/metadata_dump_load.md#backup-automatically) function by adding `--backup-meta 0`.
 :::
 
 ## Alibaba Cloud OSS

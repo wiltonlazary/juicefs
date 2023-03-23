@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -46,6 +45,16 @@ type ossClient struct {
 
 func (o *ossClient) String() string {
 	return fmt.Sprintf("oss://%s/", o.bucket.BucketName)
+}
+
+func (o *ossClient) Limits() Limits {
+	return Limits{
+		IsSupportMultipartUpload: true,
+		IsSupportUploadPartCopy:  true,
+		MinPartSize:              100 << 10,
+		MaxPartSize:              5 << 30,
+		MaxPartCount:             10000,
+	}
 }
 
 func (o *ossClient) Create() error {
@@ -177,6 +186,15 @@ func (o *ossClient) UploadPart(key string, uploadID string, num int, data []byte
 	return &Part{Num: num, ETag: r.ETag}, nil
 }
 
+func (o *ossClient) UploadPartCopy(key string, uploadID string, num int, srcKey string, off, size int64) (*Part, error) {
+	initMultipartResult := oss.InitiateMultipartUploadResult{Bucket: o.bucket.BucketName, Key: key, UploadID: uploadID}
+	partCopy, err := o.bucket.UploadPartCopy(initMultipartResult, o.bucket.BucketName, srcKey, off, size, num)
+	if o.checkError(err) != nil {
+		return nil, err
+	}
+	return &Part{Num: num, ETag: partCopy.ETag}, nil
+}
+
 func (o *ossClient) AbortUpload(key string, uploadID string) {
 	initResult := oss.InitiateMultipartUploadResult{
 		Key:      key,
@@ -229,7 +247,7 @@ func fetch(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 func fetchStsToken() (*stsCred, error) {
@@ -374,8 +392,7 @@ func newOSS(endpoint, accessKey, secretKey, token string) (ObjectStorage, error)
 		logger.Debugf("Use endpoint %q", domain)
 	}
 
-	client, err := oss.New(domain, accessKey, secretKey, oss.SecurityToken(token),
-		oss.InsecureSkipVerify(httpClient.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify))
+	client, err := oss.New(domain, accessKey, secretKey, oss.SecurityToken(token), oss.HTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("Cannot create OSS client with endpoint %s: %s", endpoint, err)
 	}

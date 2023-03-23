@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oliverisaac/shellescape"
 
 	"github.com/juicedata/juicefs/pkg/object"
 )
@@ -70,7 +72,7 @@ func httpRequest(url string, body []byte) (ans []byte, err error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 func sendStats(addr string) {
@@ -169,7 +171,7 @@ func startManager(tasks <-chan object.Object) (string, error) {
 			http.Error(w, "POST required", http.StatusBadRequest)
 			return
 		}
-		d, err := ioutil.ReadAll(req.Body)
+		d, err := io.ReadAll(req.Body)
 		if err != nil {
 			logger.Errorf("read: %s", err)
 			return
@@ -244,7 +246,22 @@ func launchWorker(address string, config *Config, wg *sync.WaitGroup) {
 				return
 			}
 			// launch itself
-			var args = []string{host, rpath}
+			var args = []string{host}
+			// set env
+			var printEnv []string
+			for k, v := range config.Env {
+				args = append(args, fmt.Sprintf("%s=%s", k, v))
+				if strings.Contains(k, "SECRET") ||
+					strings.Contains(k, "TOKEN") ||
+					strings.Contains(k, "PASSWORD") ||
+					strings.Contains(k, "AZURE_STORAGE_CONNECTION_STRING") ||
+					strings.Contains(k, "JFS_RSA_PASSPHRASE") {
+					v = "******"
+				}
+				printEnv = append(printEnv, fmt.Sprintf("%s=%s", k, v))
+			}
+
+			args = append(args, rpath)
 			if strings.HasSuffix(path, "juicefs") {
 				args = append(args, os.Args[1:]...)
 				args = append(args, "--manager", address)
@@ -255,9 +272,13 @@ func launchWorker(address string, config *Config, wg *sync.WaitGroup) {
 			if !config.Verbose && !config.Quiet {
 				args = append(args, "-q")
 			}
-
-			logger.Debugf("launch worker command args: [ssh, %s]", strings.Join(args, ", "))
-			cmd = exec.Command("ssh", args...)
+			var argsBk = make([]string, len(args))
+			copy(argsBk, args)
+			for i, s := range printEnv {
+				argsBk[i+1] = s
+			}
+			logger.Debugf("launch worker command args: [ssh, %s]", strings.Join(shellescape.EscapeArgs(argsBk), ", "))
+			cmd = exec.Command("ssh", shellescape.EscapeArgs(args)...)
 			stderr, err := cmd.StderrPipe()
 			if err != nil {
 				logger.Errorf("redirect stderr: %s", err)

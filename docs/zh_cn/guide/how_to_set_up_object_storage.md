@@ -93,7 +93,7 @@ JuiceFS 对这种区分内网外地址的对象存储服务也做了灵活的支
 
 使用内网 Endpoint 创建文件系统可以确保性能更好、延时更低，对于无法通过内网访问的客户端，可以在挂载文件系统时通过 `--bucket` 指定外网 Endpoint 进行挂载访问。
 
-## 存储类型
+## 存储类型 {#storage-class}
 
 对象存储通常支持多种存储类型，如标准存储、低频访问存储、归档存储。当创建对象存储 bucket 时你可以根据实际需求选择合适的存储类型，或者通过生命周期管理自动转换现有对象的存储类型。对于那些支持实时访问数据的存储类型（如标准存储、低频访问存储），可以作为 JuiceFS 底层的数据存储，而那些需要提前解冻才能访问的存储类型（如归档存储）则不行。
 
@@ -246,7 +246,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="$HOME/service-account-file.json"
 ```bash
 juicefs format \
     --storage gs \
-    --bucket <bucket> \
+    --bucket <bucket>[.region] \
     ... \
     myjfs
 ```
@@ -414,7 +414,7 @@ juicefs format \
 ```
 
 :::caution 特别提示
-因为 Storj DCS 的 [ListObjects](https://github.com/storj/gateway-st/blob/main/docs/s3-compatibility.md#listobjects) API 并非完全 S3 兼容（返回结果没有实现排序功能），所以 JuiceFS 的部分功能无法使用，比如 `juicefs gc`，`juicefs fsck`，`juicefs sync`，`juicefs destroy`。另外，使用 `juicefs mount` 时需要关闭[元数据自动备份](../administration/metadata_dump_load.md#自动备份)功能，即加上 `--backup-meta 0`。
+因为 Storj DCS 的 [ListObjects](https://github.com/storj/gateway-st/blob/main/docs/s3-compatibility.md#listobjects) API 并非完全 S3 兼容（返回结果没有实现排序功能），所以 JuiceFS 的部分功能无法使用，比如 `juicefs gc`，`juicefs fsck`，`juicefs sync`，`juicefs destroy`。另外，使用 `juicefs mount` 时需要关闭[元数据自动备份](../administration/metadata_dump_load.md#backup-automatically)功能，即加上 `--backup-meta 0`。
 :::
 
 ## Vultr 对象存储
@@ -460,7 +460,7 @@ juicefs format \
 ```
 
 :::caution 特别提示
-因为 Cloudflare R2 的 `ListObjects` API 并非完全 S3 兼容（返回结果没有实现排序功能），所以 JuiceFS 的部分功能无法使用，比如 `juicefs gc`、`juicefs fsck`、`juicefs sync`、`juicefs destroy`。另外，使用 `juicefs mount` 时需要关闭[元数据自动备份](../administration/metadata_dump_load.md#自动备份)功能，即加上 `--backup-meta 0`。
+因为 Cloudflare R2 的 `ListObjects` API 并非完全 S3 兼容（返回结果没有实现排序功能），所以 JuiceFS 的部分功能无法使用，比如 `juicefs gc`、`juicefs fsck`、`juicefs sync`、`juicefs destroy`。另外，使用 `juicefs mount` 时需要关闭[元数据自动备份](../administration/metadata_dump_load.md#backup-automatically)功能，即加上 `--backup-meta 0`。
 :::
 
 ## 阿里云 OSS

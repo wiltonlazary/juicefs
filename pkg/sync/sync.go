@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"runtime"
@@ -220,7 +219,7 @@ func copyPerms(dst object.ObjectStorage, obj object.Object) {
 	key := obj.Key()
 	fi := obj.(object.File)
 	if err := dst.(object.FileSystem).Chmod(key, fi.Mode()); err != nil {
-		logger.Warnf("Chmod %s to %d: %s", key, fi.Mode(), err)
+		logger.Warnf("Chmod %s to %o: %s", key, fi.Mode(), err)
 	}
 	if err := dst.(object.FileSystem).Chown(key, fi.Owner(), fi.Group()); err != nil {
 		logger.Warnf("Chown %s to (%s,%s): %s", key, fi.Owner(), fi.Group(), err)
@@ -337,7 +336,7 @@ func doCopySingle(src, dst object.ObjectStorage, key string, size int64) error {
 		} else {
 			var f *os.File
 			// download the object into disk
-			if f, err = ioutil.TempFile("", "rep"); err != nil {
+			if f, err = os.CreateTemp("", "rep"); err != nil {
 				logger.Warnf("create temp file: %s", err)
 				goto SINGLE
 			}
@@ -866,7 +865,7 @@ func Sync(src, dst object.ObjectStorage, config *Config) error {
 		limiter = ratelimit.NewBucketWithRate(bps, int64(bps)*3)
 	}
 
-	progress := utils.NewProgress(config.Verbose || config.Quiet || config.Manager != "", true)
+	progress := utils.NewProgress(config.Verbose || config.Quiet || config.Manager != "")
 	handled = progress.AddCountBar("Scanned objects", 0)
 	copied = progress.AddCountSpinner("Copied objects")
 	copiedBytes = progress.AddByteSpinner("Copied objects")

@@ -157,7 +157,7 @@ Details: https://juicefs.com/docs/community/quick_start_guide`,
 			},
 			&cli.BoolFlag{
 				Name:  "hash-prefix",
-				Usage: "give each object a hashed prefix",
+				Usage: "add a hash prefix to name of objects",
 			},
 			&cli.BoolFlag{
 				Name:  "force",
@@ -308,10 +308,21 @@ func test(store object.ObjectStorage) error {
 	return err
 }
 
+func loadEncrypt(keyPath string) string {
+	if keyPath == "" {
+		return ""
+	}
+	pem, err := os.ReadFile(keyPath)
+	if err != nil {
+		logger.Fatalf("load RSA key from %s: %s", keyPath, err)
+	}
+	return string(pem)
+}
+
 func format(c *cli.Context) error {
 	setup(c, 2)
 	removePassword(c.Args().Get(0))
-	m := meta.NewClient(c.Args().Get(0), &meta.Config{Retries: 2})
+	m := meta.NewClient(c.Args().Get(0), nil)
 	name := c.Args().Get(1)
 	validName := regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$`)
 	if !validName.MatchString(name) {
@@ -326,16 +337,7 @@ func format(c *cli.Context) error {
 	if v := c.Int("shards"); v > 256 {
 		logger.Fatalf("too many shards: %d", v)
 	}
-	loadEncrypt := func(keyPath string) string {
-		if keyPath == "" {
-			return ""
-		}
-		pem, err := os.ReadFile(keyPath)
-		if err != nil {
-			logger.Fatalf("load RSA key from %s: %s", keyPath, err)
-		}
-		return string(pem)
-	}
+
 	var create, encrypted bool
 	format, err := m.Load(false)
 	if err == nil {

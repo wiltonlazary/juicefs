@@ -24,7 +24,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -90,7 +89,7 @@ func GetHttpClient() *http.Client {
 
 func cleanup(response *http.Response) {
 	if response != nil && response.Body != nil {
-		_, _ = ioutil.ReadAll(response.Body)
+		_, _ = io.ReadAll(response.Body)
 		_ = response.Body.Close()
 	}
 }
@@ -150,7 +149,7 @@ func (s *RestfulStorage) request(method, key string, body io.Reader, headers map
 }
 
 func parseError(resp *http.Response) error {
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("request failed: %s", err)
 	}
@@ -183,14 +182,32 @@ func (s *RestfulStorage) Head(key string) (Object, error) {
 	}, nil
 }
 
+func getRange(off, limit int64) string {
+	if off > 0 || limit > 0 {
+		if limit > 0 {
+			return fmt.Sprintf("bytes=%d-%d", off, off+limit-1)
+		} else {
+			return fmt.Sprintf("bytes=%d-", off)
+		}
+	}
+	return ""
+}
+
+func checkGetStatus(statusCode int, partial bool) error {
+	var expected = http.StatusOK
+	if partial {
+		expected = http.StatusPartialContent
+	}
+	if statusCode != expected {
+		return fmt.Errorf("expected status code %d, but got %d", expected, statusCode)
+	}
+	return nil
+}
+
 func (s *RestfulStorage) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	headers := make(map[string]string)
 	if off > 0 || limit > 0 {
-		if limit > 0 {
-			headers["Range"] = fmt.Sprintf("bytes=%d-%d", off, off+limit-1)
-		} else {
-			headers["Range"] = fmt.Sprintf("bytes=%d-", off)
-		}
+		headers["Range"] = getRange(off, limit)
 	}
 	resp, err := s.request("GET", key, nil, headers)
 	if err != nil {
@@ -198,6 +215,10 @@ func (s *RestfulStorage) Get(key string, off, limit int64) (io.ReadCloser, error
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		return nil, parseError(resp)
+	}
+	if err = checkGetStatus(resp.StatusCode, len(headers) > 0); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
 	}
 	return resp.Body, nil
 }
@@ -220,7 +241,7 @@ func (s *RestfulStorage) Copy(dst, src string) error {
 		return err
 	}
 	defer in.Close()
-	d, err := ioutil.ReadAll(in)
+	d, err := io.ReadAll(in)
 	if err != nil {
 		return err
 	}

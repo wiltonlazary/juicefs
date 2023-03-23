@@ -114,25 +114,16 @@ echo "source path/to/zsh_autocomplete" >> ~/.zshrc
 
 Alternatively, if you are using bash on a Linux system, you may just copy the script to `/etc/bash_completion.d` and rename it to `juicefs`:
 
-<Tabs>
-  <TabItem value="bash" label="Bash">
-
 ```shell
 sudo cp hack/autocomplete/bash_autocomplete /etc/bash_completion.d/juicefs
-```
-
-```shell
 source /etc/bash_completion.d/juicefs
 ```
-
-  </TabItem>
-</Tabs>
 
 ## Commands
 
 ### `juicefs format` {#format}
 
-Format a volume. It's the first step for initializing a new file system volume.
+Create a file system, if a volume already exists with the same `META-URL`, this command will skip the creation step. To adjust volume settings afterwards, use [`juicefs config`](#config).
 
 #### Synopsis
 
@@ -180,6 +171,9 @@ A path to RSA private key (PEM)
 
 `--trash-days value`<br />
 number of days after which removed files will be permanently deleted (default: 1)
+
+`--hash-prefix`<br />
+add a hash prefix to name of objects (default: false)
 
 `--force`<br />
 overwrite existing format (default: false)
@@ -291,6 +285,9 @@ prefetch N blocks in parallel (default: 1)
 `--writeback`<br />
 upload objects in background (default: false), see [Client write data cache](../guide/cache_management.md#writeback)
 
+`--upload-delay value`<br />
+if writeback mode is enabled, delayed duration for uploading objects ("s", "m", "h") (default: 0s)
+
 `--cache-dir value`<br />
 directory paths of local cache, use `:` (Linux, macOS) or `;` (Windows) to separate multiple paths (default: `"$HOME/.juicefs/cache"` or `"/var/jfsCache"`), see [Client read data cache](../guide/cache_management.md#client-read-cache)
 
@@ -317,9 +314,6 @@ interval (in seconds) to automatically backup metadata in the object storage (0 
 
 `--heartbeat value`<br />
 interval (in seconds) to send heartbeat; it's recommended that all clients use the same heartbeat value (default: "12")
-
-`--upload-delay value`<br />
-delayed duration for uploading objects ("s", "m", "h") (default: 0s)
 
 `--no-bgjob`<br />
 disable background jobs (clean-up, backup, etc.) (default: false)
@@ -581,6 +575,12 @@ file entry cache timeout in seconds (default: 0), read [Kernel Metadata Cache](.
 `--dir-entry-cache value`<br />
 dir entry cache timeout in seconds (default: 1), read [Kernel Metadata Cache](../guide/cache_management.md#kernel-metadata-cache)
 
+`--cert-file`<br />
+certificate file for HTTPS
+
+`--key-file`<br />
+key file for HTTPS
+
 `--gzip`<br />
 compress served files via gzip (default: false)
 
@@ -685,7 +685,7 @@ limit the number of objects that will be processed (default: -1)
 manager address
 
 `--worker value`<br />
-hosts (seperated by comma) to launch worker
+hosts (separated by comma) to launch worker
 
 `--bwlimit value`<br />
 limit bandwidth in Mbps (0 means unlimited) (default: 0)
@@ -840,6 +840,9 @@ size of each big object in MiB (default: 1024)
 `--small-object-size value`<br />
 size of each small object in KiB (default: 128)
 
+`--small-objects value`<br />
+number of small objects (default: 100)
+
 `--skip-functional-tests`<br />
 skip functional tests (default: false)
 
@@ -854,8 +857,6 @@ $ ACCESS_KEY=myAccessKey SECRET_KEY=mySecretKey juicefs objbench --storage s3  h
 ```
 
 ### `juicefs gc` {#gc}
-
-用来处理「对象泄漏」，以及因为覆盖写而产生的碎片数据的命令。详见[「状态检查 & 维护」](../administration/status_check_and_maintenance.md#gc)。
 
 Deal with leaked objects, and garbage fragments produced by file overwrites. See [Status Check & Maintenance](../administration/status_check_and_maintenance.md#gc).
 
@@ -944,7 +945,7 @@ $ juicefs profile /tmp/jfs.alog
 $ juicefs profile /tmp/jfs.alog --interval 0
 ```
 
-### `juicefs stats`
+### `juicefs stats` {#stats}
 
 Show runtime statistics.
 
@@ -997,9 +998,9 @@ juicefs status redis://localhost
 
 ### `juicefs warmup` {#warmup}
 
-Download data to local cache in advance, to achieve better performance on application's first read.
+Download data to local cache in advance, to achieve better performance on application's first read. You can specify a mount point path to recursively warm-up all files under this path. You can also specify a file through the `--file` option to only warm-up the files contained in it.
 
-You can specify a mount point path to recursively warm-up all files under this path. You can also specify a file through the `--file` option to only warm-up the files contained in it.
+If the files needing warming up resides in many different directories, you should specify their names in a text file, and pass to the `warmup` command using the `--file` option, allowing `juicefs warmup` to download concurrently, which is significantly faster than calling `juicefs warmup` multiple times, each with a single file.
 
 #### Synopsis
 
@@ -1013,7 +1014,7 @@ juicefs warmup [command options] [PATH ...]
 file containing a list of paths (each line is a file path)
 
 `--threads value, -p value`<br />
-number of concurrent workers (default: 50)
+number of concurrent workers, default to 50. Reduce this number in low bandwidth environment to avoid download timeouts
 
 `--background, -b`<br />
 run in background (default: false)
@@ -1032,7 +1033,7 @@ $ cat /tmp/filelist
 $ juicefs warmup -f /tmp/filelist
 ```
 
-### `juicefs dump`
+### `juicefs dump` {#dump}
 
 Dump metadata into a JSON file.
 
@@ -1058,7 +1059,7 @@ $ juicefs dump redis://localhost meta-dump
 $ juicefs dump redis://localhost sub-meta-dump --subdir /dir/in/jfs
 ```
 
-### `juicefs load`
+### `juicefs load` {#load}
 
 Load metadata from a previously dumped JSON file.
 
@@ -1076,9 +1077,9 @@ When the FILE is not provided, STDIN will be used instead.
 juicefs load redis://localhost/1 meta-dump
 ```
 
-### `juicefs config`
+### `juicefs config` {#config}
 
-Change config of a volume.
+Change config of a volume. Note that after updating some settings, the client may not take effect immediately, and it needs to wait for a certain period of time. The specific waiting time can be controlled by the [`--heartbeat`](#mount) option.
 
 #### Synopsis
 

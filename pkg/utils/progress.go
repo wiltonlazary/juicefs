@@ -17,7 +17,9 @@
 package utils
 
 import (
+	"fmt"
 	"os"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/vbauerster/mpb/v7"
@@ -26,9 +28,8 @@ import (
 
 type Progress struct {
 	*mpb.Progress
-	Quiet     bool
-	showSpeed bool
-	bars      []*mpb.Bar
+	Quiet bool
+	bars  []*mpb.Bar
 }
 
 type Bar struct {
@@ -74,28 +75,44 @@ func (s *DoubleSpinner) SetCurrent(count, bytes int64) {
 	s.bytes.SetCurrent(bytes)
 }
 
-func NewProgress(quiet, showSpeed bool) *Progress {
+func NewProgress(quiet bool) *Progress {
 	var p *Progress
 	if quiet || os.Getenv("DISPLAY_PROGRESSBAR") == "false" || !isatty.IsTerminal(os.Stdout.Fd()) {
-		p = &Progress{mpb.New(mpb.WithWidth(64), mpb.WithOutput(nil)), true, showSpeed, nil}
+		p = &Progress{mpb.New(mpb.WithWidth(64), mpb.WithOutput(nil)), true, nil}
 	} else {
-		p = &Progress{mpb.New(mpb.WithWidth(64)), false, showSpeed, nil}
+		p = &Progress{mpb.New(mpb.WithWidth(64)), false, nil}
 		SetOutput(p)
 	}
 	return p
 }
 
 func (p *Progress) AddCountBar(name string, total int64) *Bar {
+	startTime := time.Now()
+	var speedMsg, usedMsg string
 	b := p.Progress.AddBar(0, // disable triggerComplete
 		mpb.PrependDecorators(
-			decor.Name(name+" count: ", decor.WCSyncWidth),
-			decor.CountersNoUnit("%d / %d"),
+			decor.Name(name+": ", decor.WCSyncWidth),
+			decor.CountersNoUnit("%d/%d"),
 		),
 		mpb.AppendDecorators(
-			decor.OnComplete(decor.Percentage(decor.WC{W: 5}), "done"),
+			decor.OnComplete(decor.AverageSpeed(0, " %.1f/s", decor.WCSyncWidthR), ""),
+			decor.Any(func(s decor.Statistics) string {
+				if s.Completed && speedMsg == "" {
+					speed := float64(s.Current) / time.Since(startTime).Seconds()
+					speedMsg = fmt.Sprintf(" %.1f/s", speed)
+				}
+				return speedMsg
+			}, decor.WCSyncWidthR),
+			decor.OnComplete(decor.Name(" ETA: ", decor.WCSyncWidthR), ""),
 			decor.OnComplete(
-				decor.AverageETA(decor.ET_STYLE_GO, decor.WC{W: 6}), "",
+				decor.AverageETA(decor.ET_STYLE_GO, decor.WCSyncWidthR), "",
 			),
+			decor.Any(func(s decor.Statistics) string {
+				if s.Completed && usedMsg == "" {
+					usedMsg = " used: " + (time.Since(startTime)).String()
+				}
+				return usedMsg
+			}, decor.WCSyncWidthR),
 		),
 	)
 	b.SetTotal(total, false)
@@ -113,12 +130,10 @@ func newSpinner() mpb.BarFiller {
 
 func (p *Progress) AddCountSpinner(name string) *Bar {
 	decors := []decor.Decorator{
-		decor.Name(name+" count: ", decor.WCSyncWidth),
+		decor.Name(name+": ", decor.WCSyncWidth),
 		decor.Merge(decor.CurrentNoUnit("%d", decor.WCSyncSpaceR), decor.WCSyncSpaceR),
 	}
-	if p.showSpeed {
-		decors = append(decors, decor.AverageSpeed(0, "  %.2f/s", decor.WCSyncSpaceR))
-	}
+	decors = append(decors, decor.AverageSpeed(0, "  %.1f/s", decor.WCSyncSpaceR))
 	b := p.Progress.Add(0, newSpinner(),
 		mpb.PrependDecorators(decors...),
 		mpb.BarFillerClearOnComplete(),
@@ -129,13 +144,12 @@ func (p *Progress) AddCountSpinner(name string) *Bar {
 
 func (p *Progress) AddByteSpinner(name string) *Bar {
 	decors := []decor.Decorator{
-		decor.Name(name+" bytes: ", decor.WCSyncWidth),
-		decor.CurrentKibiByte("% .2f", decor.WCSyncSpaceR),
+		decor.Name(name+": ", decor.WCSyncWidth),
+		decor.CurrentKibiByte("% .1f", decor.WCSyncSpaceR),
 		decor.CurrentNoUnit("(%d Bytes)", decor.WCSyncSpaceR),
 	}
-	if p.showSpeed { // FIXME: maybe use EWMA speed
-		decors = append(decors, decor.AverageSpeed(decor.UnitKiB, "  % .2f", decor.WCSyncSpaceR))
-	}
+	// FIXME: maybe use EWMA speed
+	decors = append(decors, decor.AverageSpeed(decor.UnitKiB, "  % .1f", decor.WCSyncSpaceR))
 	b := p.Progress.Add(0, newSpinner(),
 		mpb.PrependDecorators(decors...),
 		mpb.BarFillerClearOnComplete(),
@@ -181,7 +195,7 @@ func (p *Progress) Done() {
 }
 
 func MockProgress() (*Progress, *Bar) {
-	progress := NewProgress(true, false)
+	progress := NewProgress(true)
 	bar := progress.AddCountBar("Mock", 0)
 	return progress, bar
 }

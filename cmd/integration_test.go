@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 const gatewayMeta = "redis://127.0.0.1:6379/14"
@@ -66,6 +66,8 @@ func startWebdav(t *testing.T) {
 	ResetHttp()
 
 	go func() {
+		os.Setenv("WEBDAV_USER", "root")
+		os.Setenv("WEBDAV_PASSWORD", "1234")
 		if err := Main([]string{"", "webdav", webdavMeta, webdavAddr, "--no-usage-report"}); err != nil {
 			t.Errorf("gateway failed: %s", err)
 		}

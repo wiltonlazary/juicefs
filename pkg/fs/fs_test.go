@@ -30,7 +30,7 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 )
 
-//mutate_test_job_number: 5
+// mutate_test_job_number: 5
 func TestFileStat(t *testing.T) {
 	attr := meta.Attr{
 		Typ:   meta.TypeDirectory,
@@ -170,8 +170,11 @@ func TestFileSystem(t *testing.T) {
 	if target, e := fs.Readlink(ctx, "/sym"); e != 0 || string(target) != "hello" {
 		t.Fatalf("readlink: %s", string(target))
 	}
-	if fi, err := fs.Stat(ctx, "/sym"); err != 0 || fi.name != "sym" {
+	if fi, err := fs.Stat(ctx, "/sym"); err != 0 || fi.name != "sym" || fi.IsSymlink() {
 		t.Fatalf("stat symlink: %s %+v", err, fi)
+	}
+	if fi, err := fs.Lstat(ctx, "/sym"); err != 0 || fi.name != "sym" || !fi.IsSymlink() {
+		t.Fatalf("lstat symlink: %s %+v", err, fi)
 	}
 	if err := fs.Delete(ctx, "/sym"); err != 0 {
 		t.Fatalf("delete /sym: %s", err)
@@ -215,7 +218,7 @@ func TestFileSystem(t *testing.T) {
 		t.Fatalf("follow symlink: %s %+v", e, fi)
 	}
 
-	if s, e := d.Summary(ctx); e != 0 || s.Dirs != 2 || s.Files != 2 || s.Length != 8 || s.Size != 16<<10 {
+	if s, e := d.Summary(ctx); e != 0 || s.Dirs != 2 || s.Files != 2 || s.Length != 7 || s.Size != 16<<10 {
 		t.Fatalf("summary: %s %+v", e, s)
 	}
 	if e := fs.Delete(ctx, "/d"); e == 0 || !IsNotEmpty(e) {
@@ -269,7 +272,7 @@ func TestFileSystem(t *testing.T) {
 func createTestFS(t *testing.T) *FileSystem {
 	checkAccessFile = time.Millisecond
 	rotateAccessLog = 500
-	m := meta.NewClient("memkv://", &meta.Config{})
+	m := meta.NewClient("memkv://", nil)
 	format := &meta.Format{
 		Name:      "test",
 		BlockSize: 4096,
@@ -277,11 +280,10 @@ func createTestFS(t *testing.T) *FileSystem {
 	}
 	_ = m.Init(format, true)
 	var conf = vfs.Config{
-		Meta: &meta.Config{},
+		Meta: meta.DefaultConf(),
 		Chunk: &chunk.Config{
 			BlockSize:  format.BlockSize << 10,
 			MaxUpload:  1,
-			MaxDeletes: 1,
 			BufferSize: 100 << 20,
 		},
 		DirEntryTimeout: time.Millisecond * 100,

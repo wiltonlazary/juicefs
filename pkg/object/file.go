@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -31,6 +30,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/juicedata/juicefs/pkg/utils"
 )
 
 const (
@@ -113,9 +114,9 @@ func (d *filestore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	if finfo.IsDir() {
+	if finfo.IsDir() || off > finfo.Size() {
 		_ = f.Close()
-		return ioutil.NopCloser(bytes.NewBuffer([]byte{})), nil
+		return io.NopCloser(bytes.NewBuffer([]byte{})), nil
 	}
 
 	if off > 0 {
@@ -130,7 +131,7 @@ func (d *filestore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 		if n, err := f.Read(buf); err != nil {
 			return nil, err
 		} else {
-			return ioutil.NopCloser(bytes.NewBuffer(buf[:n])), nil
+			return io.NopCloser(bytes.NewBuffer(buf[:n])), nil
 		}
 	}
 	return f, nil
@@ -401,8 +402,8 @@ func (d *filestore) Chmod(path string, mode os.FileMode) error {
 
 func (d *filestore) Chown(path string, owner, group string) error {
 	p := d.path(path)
-	uid := lookupUser(owner)
-	gid := lookupGroup(group)
+	uid := utils.LookupUser(owner)
+	gid := utils.LookupGroup(group)
 	return os.Chown(p, uid, gid)
 }
 

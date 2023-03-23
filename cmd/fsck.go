@@ -64,6 +64,10 @@ $ juicefs fsck redis://localhost --path /d1/d2 --recursive`,
 				Aliases: []string{"r"},
 				Usage:   "recursively check or repair",
 			},
+			&cli.BoolFlag{
+				Name:  "sync-dir-stat",
+				Usage: "sync stat of all directories, even if they are existed and not broken (NOTE: it may take a long time for huge trees)",
+			},
 		},
 	}
 }
@@ -74,7 +78,7 @@ func fsck(ctx *cli.Context) error {
 		logger.Fatalf("Please provide the path to repair with `--path` option")
 	}
 	removePassword(ctx.Args().Get(0))
-	m := meta.NewClient(ctx.Args().Get(0), &meta.Config{Retries: 10, Strict: true})
+	m := meta.NewClient(ctx.Args().Get(0), nil)
 	format, err := m.Load(true)
 	if err != nil {
 		logger.Fatalf("load setting: %s", err)
@@ -84,7 +88,7 @@ func fsck(ctx *cli.Context) error {
 		if !strings.HasPrefix(p, "/") {
 			logger.Fatalf("File path should be the absolute path within JuiceFS")
 		}
-		return m.Check(c, p, ctx.Bool("repair"), ctx.Bool("recursive"))
+		return m.Check(c, p, ctx.Bool("repair"), ctx.Bool("recursive"), ctx.Bool("sync-dir-stat"))
 	}
 
 	chunkConf := chunk.Config{
@@ -109,7 +113,7 @@ func fsck(ctx *cli.Context) error {
 	}
 
 	// Find all blocks in object storage
-	progress := utils.NewProgress(false, false)
+	progress := utils.NewProgress(false)
 	blockDSpin := progress.AddDoubleSpinner("Found blocks")
 	var blocks = make(map[string]int64)
 	for obj := range objs {

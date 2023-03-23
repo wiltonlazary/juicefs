@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -221,6 +222,9 @@ func daemonRun(c *cli.Context, addr string, vfsConf *vfs.Config, m meta.Meta) {
 	if err != nil {
 		logger.Fatalf("Failed to make daemon: %s", err)
 	}
+	if runtime.GOOS == "linux" {
+		log.SetOutput(os.Stderr)
+	}
 }
 
 func expandPathForEmbedded(addr string) string {
@@ -246,7 +250,7 @@ func expandPathForEmbedded(addr string) string {
 func getVfsConf(c *cli.Context, metaConf *meta.Config, format *meta.Format, chunkConf *chunk.Config) *vfs.Config {
 	cfg := &vfs.Config{
 		Meta:       metaConf,
-		Format:     format,
+		Format:     *format,
 		Version:    version.Version(),
 		Chunk:      chunkConf,
 		BackupMeta: duration(c.String("backup-meta")),
@@ -273,17 +277,9 @@ func configEqual(a, b *vfs.Config) bool {
 	}
 
 	ac, bc := *a, *b
-	ac.Meta, ac.Chunk, ac.Format, ac.Port, ac.AttrTimeout, ac.DirEntryTimeout, ac.EntryTimeout = nil, nil, nil, nil, 0, 0, 0
-	bc.Meta, bc.Chunk, bc.Format, bc.Port, bc.AttrTimeout, bc.DirEntryTimeout, bc.EntryTimeout = nil, nil, nil, nil, 0, 0, 0
+	ac.Meta, ac.Chunk, ac.Port, ac.Format.SecretKey, ac.AttrTimeout, ac.DirEntryTimeout, ac.EntryTimeout = nil, nil, nil, "", 0, 0, 0
+	bc.Meta, bc.Chunk, bc.Port, bc.Format.SecretKey, bc.AttrTimeout, bc.DirEntryTimeout, bc.EntryTimeout = nil, nil, nil, "", 0, 0, 0
 	eq := ac == bc
-
-	if a.Format == nil || b.Format == nil {
-		eq = eq && a.Format == b.Format
-	} else {
-		af, bf := *a.Format, *b.Format
-		af.SecretKey, bf.SecretKey = "", ""
-		eq = eq && af == bf
-	}
 
 	if a.Meta == nil || b.Meta == nil {
 		eq = eq && a.Meta == b.Meta
@@ -351,25 +347,18 @@ func prepareMp(newCfg *vfs.Config, mp string) (ignore bool) {
 }
 
 func getMetaConf(c *cli.Context, mp string, readOnly bool) *meta.Config {
-	cfg := &meta.Config{
-		Retries:    c.Int("io-retries"),
-		Strict:     true,
-		ReadOnly:   readOnly,
-		NoBGJob:    c.Bool("no-bgjob"),
-		OpenCache:  time.Duration(c.Float64("open-cache") * 1e9),
-		Heartbeat:  duration(c.String("heartbeat")),
-		MountPoint: mp,
-		Subdir:     c.String("subdir"),
-	}
-	if cfg.Heartbeat < time.Second {
-		logger.Warnf("heartbeat should not be less than 1 second")
-		cfg.Heartbeat = time.Second
-	}
-	if cfg.Heartbeat > time.Minute*10 {
-		logger.Warnf("heartbeat shouldd not be greater than 10 minutes")
-		cfg.Heartbeat = time.Minute * 10
-	}
-	return cfg
+	conf := meta.DefaultConf()
+	conf.Retries = c.Int("io-retries")
+	conf.MaxDeletes = c.Int("max-deletes")
+	conf.SkipDirNlink = c.Int("skip-dir-nlink")
+	conf.ReadOnly = readOnly
+	conf.NoBGJob = c.Bool("no-bgjob")
+	conf.OpenCache = time.Duration(c.Float64("open-cache") * 1e9)
+	conf.OpenCacheLimit = c.Uint64("open-cache-limit")
+	conf.Heartbeat = duration(c.String("heartbeat"))
+	conf.MountPoint = mp
+	conf.Subdir = c.String("subdir")
+	return conf
 }
 
 func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
@@ -386,7 +375,6 @@ func getChunkConf(c *cli.Context, format *meta.Format) *chunk.Config {
 		GetTimeout:    time.Second * time.Duration(c.Int("get-timeout")),
 		PutTimeout:    time.Second * time.Duration(c.Int("put-timeout")),
 		MaxUpload:     c.Int("max-uploads"),
-		MaxDeletes:    c.Int("max-deletes"),
 		MaxRetries:    c.Int("io-retries"),
 		Writeback:     c.Bool("writeback"),
 		Prefetch:      c.Int("prefetch"),

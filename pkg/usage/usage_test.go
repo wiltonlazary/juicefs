@@ -19,7 +19,7 @@ package usage
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -32,7 +32,13 @@ import (
 func TestUsageReport(t *testing.T) {
 	// invalid addr
 	reportUrl = "http://127.0.0.1/report-usage"
-	m := meta.NewClient("memkv://", &meta.Config{})
+	m := meta.NewClient("memkv://", nil)
+	format := &meta.Format{
+		Name:      "test",
+		BlockSize: 4096,
+		Capacity:  1 << 30,
+	}
+	_ = m.Init(format, true)
 	go ReportUsage(m, "unittest")
 	// wait for it to report to unavailable address, it should not panic.
 	time.Sleep(time.Millisecond * 100)
@@ -47,7 +53,7 @@ func TestUsageReport(t *testing.T) {
 	var u usage
 	done := make(chan bool)
 	mux.HandleFunc("/report-usage", func(rw http.ResponseWriter, r *http.Request) {
-		d, _ := ioutil.ReadAll(r.Body)
+		d, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(d, &u)
 		_, _ = rw.Write([]byte("OK"))
 		done <- true
