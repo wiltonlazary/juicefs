@@ -184,7 +184,8 @@ All keys:
   SHssssssss         session heartbeat // for legacy client
   SIssssssss         session info
   SSssssssssiiiiiiii sustained inode
-  Uiiiiiiii	         data length, space and inodes usage in directory
+  Uiiiiiiii          data length, space and inodes usage in directory
+  QDiiiiiiii         directory quota
 */
 
 func (m *kvMeta) inodeKey(inode Ino) []byte {
@@ -237,6 +238,10 @@ func (m *kvMeta) legacySessionKey(sid uint64) []byte {
 
 func (m *kvMeta) dirStatKey(inode Ino) []byte {
 	return m.fmtKey("U", inode)
+}
+
+func (m *kvMeta) dirQuotaKey(inode Ino) []byte {
+	return m.fmtKey("QD", inode)
 }
 
 func (m *kvMeta) parseSid(key string) uint64 {
@@ -328,6 +333,25 @@ func (m *kvMeta) packDirStat(st *dirStat) []byte {
 func (m *kvMeta) parseDirStat(buf []byte) *dirStat {
 	b := utils.FromBuffer(buf)
 	return &dirStat{int64(b.Get64()), int64(b.Get64()), int64(b.Get64())}
+}
+
+func (m *kvMeta) packQuota(q *Quota) []byte {
+	b := utils.NewBuffer(32)
+	b.Put64(uint64(q.MaxSpace))
+	b.Put64(uint64(q.MaxInodes))
+	b.Put64(uint64(q.UsedSpace))
+	b.Put64(uint64(q.UsedInodes))
+	return b.Bytes()
+}
+
+func (m *kvMeta) parseQuota(buf []byte) *Quota {
+	b := utils.FromBuffer(buf)
+	return &Quota{
+		MaxSpace:   int64(b.Get64()),
+		MaxInodes:  int64(b.Get64()),
+		UsedSpace:  int64(b.Get64()),
+		UsedInodes: int64(b.Get64()),
+	}
 }
 
 func (m *kvMeta) get(key []byte) ([]byte, error) {
@@ -917,7 +941,7 @@ func (m *kvMeta) Truncate(ctx Context, inode Ino, flags uint8, length uint64, at
 		}
 		newLength = int64(length) - int64(t.Length)
 		newSpace = align4K(length) - align4K(t.Length)
-		if newSpace > 0 && m.checkQuota(newSpace, 0) {
+		if newSpace > 0 && m.checkQuota(ctx, newSpace, 0, t.Parent) {
 			return syscall.ENOSPC
 		}
 		var left, right = t.Length, length
@@ -1013,7 +1037,7 @@ func (m *kvMeta) Fallocate(ctx Context, inode Ino, mode uint8, off uint64, size 
 		old := t.Length
 		newLength = int64(length) - int64(t.Length)
 		newSpace = align4K(length) - align4K(t.Length)
-		if newSpace > 0 && m.checkQuota(newSpace, 0) {
+		if newSpace > 0 && m.checkQuota(ctx, newSpace, 0, t.Parent) {
 			return syscall.ENOSPC
 		}
 		t.Length = length
@@ -1305,7 +1329,7 @@ func (m *kvMeta) doUnlink(ctx Context, parent Ino, name string, attr *Attr, skip
 	return errno(err)
 }
 
-func (m *kvMeta) doRmdir(ctx Context, parent Ino, name string, skipCheckTrash ...bool) syscall.Errno {
+func (m *kvMeta) doRmdir(ctx Context, parent Ino, name string, pinode *Ino, skipCheckTrash ...bool) syscall.Errno {
 	var trash Ino
 	if !(len(skipCheckTrash) == 1 && skipCheckTrash[0]) {
 		if st := m.checkTrash(parent, &trash); st != 0 {
@@ -1326,6 +1350,9 @@ func (m *kvMeta) doRmdir(ctx Context, parent Ino, name string, skipCheckTrash ..
 		_type, inode := m.parseEntry(buf)
 		if _type != TypeDirectory {
 			return syscall.ENOTDIR
+		}
+		if pinode != nil {
+			*pinode = inode
 		}
 		rs := tx.gets(m.inodeKey(parent), m.inodeKey(inode))
 		if rs[0] == nil {
@@ -1369,6 +1396,7 @@ func (m *kvMeta) doRmdir(ctx Context, parent Ino, name string, skipCheckTrash ..
 		}
 		tx.delete(m.entryKey(parent, name))
 		tx.delete(m.dirStatKey(inode))
+		tx.delete(m.dirQuotaKey(inode))
 		if trash > 0 {
 			tx.set(m.inodeKey(inode), m.marshal(&attr))
 			tx.set(m.entryKey(trash, m.trashEntry(parent, inode, name)), buf)
@@ -1582,6 +1610,9 @@ func (m *kvMeta) doRename(ctx Context, parentSrc Ino, nameSrc string, parentDst 
 						tx.deleteKeys(m.fmtKey("A", dino, "P"))
 					}
 				}
+				if dtyp == TypeDirectory {
+					tx.delete(m.dirQuotaKey(dino))
+				}
 			}
 		}
 		if parentDst != parentSrc {
@@ -1744,9 +1775,7 @@ func (m *kvMeta) doReaddir(ctx Context, inode Ino, plus uint8, entries *[]*Entry
 
 func (m *kvMeta) doDeleteSustainedInode(sid uint64, inode Ino) error {
 	var attr Attr
-	var newSpace int64
 	err := m.txn(func(tx *kvTxn) error {
-		newSpace = 0
 		a := tx.get(m.inodeKey(inode))
 		if a == nil {
 			return nil
@@ -1755,12 +1784,13 @@ func (m *kvMeta) doDeleteSustainedInode(sid uint64, inode Ino) error {
 		tx.set(m.delfileKey(inode, attr.Length), m.packInt64(time.Now().Unix()))
 		tx.delete(m.inodeKey(inode))
 		tx.delete(m.sustainedKey(sid, inode))
-		newSpace = -align4K(attr.Length)
 		return nil
 	})
 	if err == nil {
+		newSpace := -align4K(attr.Length)
 		m.updateStats(newSpace, -1)
 		m.tryDeleteFileData(inode, attr.Length, false)
+		m.updateDirQuota(Background, attr.Parent, newSpace, -1)
 	}
 	return err
 }
@@ -1819,11 +1849,10 @@ func (m *kvMeta) Write(ctx Context, inode Ino, indx uint32, off uint32, slice Sl
 			newLength = int64(newleng - attr.Length)
 			newSpace = align4K(newleng) - align4K(attr.Length)
 			attr.Length = newleng
-			if m.checkQuota(newSpace, 0) {
-				return syscall.ENOSPC
-			}
 		}
-
+		if newSpace > 0 && m.checkQuota(ctx, newSpace, 0, attr.Parent) {
+			return syscall.ENOSPC
+		}
 		now := time.Now()
 		attr.Mtime = now.Unix()
 		attr.Mtimensec = uint32(now.Nanosecond())
@@ -1887,7 +1916,7 @@ func (m *kvMeta) CopyFileRange(ctx Context, fin Ino, offIn uint64, fout Ino, off
 			newSpace = align4K(newleng) - align4K(attr.Length)
 			attr.Length = newleng
 		}
-		if m.checkQuota(newSpace, 0) {
+		if newSpace > 0 && m.checkQuota(ctx, newSpace, 0, attr.Parent) {
 			return syscall.ENOSPC
 		}
 		now := time.Now()
@@ -2596,6 +2625,71 @@ func (m *kvMeta) doRemoveXattr(ctx Context, inode Ino, name string) syscall.Errn
 	}))
 }
 
+func (m *kvMeta) doGetQuota(ctx Context, inode Ino) (*Quota, error) {
+	buf, err := m.get(m.dirQuotaKey(inode))
+	if err != nil {
+		return nil, err
+	} else if buf == nil {
+		return nil, nil
+	} else if len(buf) != 32 {
+		return nil, fmt.Errorf("invalid quota value: %v", buf)
+	}
+	return m.parseQuota(buf), nil
+}
+
+func (m *kvMeta) doSetQuota(ctx Context, inode Ino, quota *Quota, create bool) error {
+	return m.txn(func(tx *kvTxn) error {
+		if create {
+			tx.set(m.dirQuotaKey(inode), m.packQuota(quota))
+		} else {
+			buf := tx.get(m.dirQuotaKey(inode))
+			if len(buf) == 32 {
+				q := m.parseQuota(buf)
+				quota.UsedSpace, quota.UsedInodes = q.UsedSpace, q.UsedInodes
+			}
+			tx.set(m.dirQuotaKey(inode), m.packQuota(quota))
+		}
+		return nil
+	})
+}
+func (m *kvMeta) doDelQuota(ctx Context, inode Ino) error {
+	return m.deleteKeys(m.dirQuotaKey(inode))
+}
+
+func (m *kvMeta) doLoadQuotas(ctx Context) (map[Ino]*Quota, error) {
+	pairs, err := m.scanValues(m.fmtKey("QD"), -1, nil)
+	if err != nil || len(pairs) == 0 {
+		return nil, err
+	}
+
+	quotas := make(map[Ino]*Quota, len(pairs))
+	for k, v := range pairs {
+		inode := m.decodeInode([]byte(k[2:])) // skip "QD"
+		quota := m.parseQuota(v)
+		quotas[inode] = quota
+	}
+	return quotas, nil
+}
+
+func (m *kvMeta) doFlushQuota(ctx Context, inode Ino, space, inodes int64) error {
+	key := m.dirQuotaKey(inode)
+	return m.txn(func(tx *kvTxn) error {
+		rawQ := tx.get(key)
+		if len(rawQ) == 0 {
+			logger.Warnf("No quota for inode %d, skip flushing", inode)
+			return nil
+		}
+		if len(rawQ) != 32 {
+			return fmt.Errorf("invalid quota value: %v", rawQ)
+		}
+		q := m.parseQuota(rawQ)
+		q.UsedSpace += space
+		q.UsedInodes += inodes
+		tx.set(key, m.packQuota(q))
+		return nil
+	}, inode)
+}
+
 func (m *kvMeta) dumpEntry(inode Ino, e *DumpedEntry) error {
 	if m.snap != nil {
 		return nil
@@ -3276,7 +3370,7 @@ func (m *kvMeta) cloneEntry(ctx Context, srcIno Ino, srcType uint8, dstParentIno
 			}
 			// copy chunks
 			if srcAttr.Length != 0 {
-				if m.checkQuota(align4K(srcAttr.Length), 0) {
+				if m.checkQuota(ctx, align4K(srcAttr.Length), 0, dstParentIno) {
 					return syscall.ENOSPC
 				}
 				vals := make(map[string][]byte)
@@ -3336,7 +3430,7 @@ func (m *kvMeta) cloneEntry(ctx Context, srcIno Ino, srcType uint8, dstParentIno
 }
 
 func (m *kvMeta) mkNodeWithAttr(ctx Context, tx *kvTxn, srcIno Ino, srcAttr *Attr, dstParentIno Ino, dstName string, dstIno *Ino, cmode uint8, cumask uint16, attach bool) error {
-	if m.checkQuota(4<<10, 1) {
+	if m.checkQuota(ctx, align4K(0), 1, dstParentIno) {
 		return syscall.ENOSPC
 	}
 	srcAttr.Parent = dstParentIno
